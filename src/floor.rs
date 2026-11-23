@@ -352,7 +352,7 @@ impl Floor {
                 for sway in &mut group.sways {
                     let distance = (sway.at() - player.xz()).norm();
                     let shown = 1.0 - crate::random::smoothstep(SWAY.0, SWAY.1, distance);
-                    sway.update(wind, dt, graph, shown, wind::detail_at(distance));
+                    sway.update(wind, dt, graph, shown, wind::detail_at(distance), wind::every_at(distance));
                 }
             }
         }

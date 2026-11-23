@@ -92,6 +92,9 @@ pub struct Wind {
     phases: [f32; 7],
     gusts: Noise,
     eddies: Noise,
+    /// How many times it has moved on: plants far off take turns being bent by it (see
+    /// [`every_at`]).
+    tick: u32,
 }
 
 impl Wind {
@@ -106,6 +109,7 @@ impl Wind {
             phases: std::array::from_fn(|_| random.between(0.0, TAU)),
             gusts: Noise(random.next()),
             eddies: Noise(random.next()),
+            tick: 0,
         };
         wind.update(0.0);
         wind
@@ -114,6 +118,7 @@ impl Wind {
     /// Moves the wind on by `dt` seconds.
     pub fn update(&mut self, dt: f32) {
         self.time += dt;
+        self.tick = self.tick.wrapping_add(1);
         let (t, p) = (self.time, self.phases);
         // A few slow waves, none a whole number of times another, so it never repeats: the
         // wind veers by up to about 50 degrees either way over some minutes, and dies down and
@@ -172,6 +177,24 @@ pub struct Sway {
     order: [Option<u8>; 9],
     /// Whether it was last left unbent, too far off to sway.
     still: bool,
+    /// Time passed since it was last bent, and which of the updates it is bent at, far off (see
+    /// [`every_at`]).
+    waited: f32,
+    phase: u32,
+}
+
+/// Every how many updates a plant `distance` meters from the player is bent: each one, near by;
+/// further off, less often - its sway too small there for the steps to show, and thousands of
+/// plants bent every update cost the game, the renderer and the shadows dearly. The time between
+/// is made up for when it is bent.
+pub fn every_at(distance: f32) -> u32 {
+    if distance < 20.0 {
+        1
+    } else if distance < 45.0 {
+        2
+    } else {
+        4
+    }
 }
 
 impl Sway {
@@ -212,6 +235,9 @@ impl Sway {
             limbs: limb_rates.map(|rate| (random.between(0.0, TAU), rate)),
             order,
             still: false,
+            waited: 0.0,
+            // From where it stands, not drawn at random: that would grow a different forest.
+            phase: (at.x * 7.31 + at.z * 13.7).abs() as u32,
         })
     }
 
@@ -224,15 +250,24 @@ impl Sway {
     /// of its strength: 0 leaves it unbent, and costs nothing once it is (the renderer skips
     /// shapes at no weight). Its stem's drop and its flutter and limbs, too fine to see far off,
     /// are at `detail` of theirs: at 0, only its two bends are drawn, a third of the cost.
-    pub fn update(&mut self, wind: &Wind, dt: f32, graph: &mut Graph, shown: f32, detail: f32) {
+    ///
+    /// Bent only every `every`th time the wind moves on (its turn among them its own, so plants
+    /// take turns: see [`every_at`]), by the time passed since.
+    pub fn update(&mut self, wind: &Wind, dt: f32, graph: &mut Graph, shown: f32, detail: f32, every: u32) {
         if shown <= 0.0 {
             if !self.still {
                 self.pose(graph, [0.0; 9]);
                 self.still = true;
             }
+            self.waited = 0.0;
             return;
         }
         self.still = false;
+        self.waited += dt;
+        if every > 1 && wind.tick.wrapping_add(self.phase) % every != 0 {
+            return;
+        }
+        let dt = std::mem::take(&mut self.waited);
         let push = wind.at(self.at.x, self.at.y) * self.shelter;
         // x'' + 2 zeta omega x' + omega^2 x = omega^2 push, in steps short enough to keep the
         // stiffest grass steady whatever the frame time.

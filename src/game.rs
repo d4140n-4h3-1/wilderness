@@ -462,7 +462,7 @@ impl Plugin for Wilderness {
             for tree in &mut self.trees {
                 let distance = (tree.at() - player).norm();
                 let shown = 1.0 - crate::random::smoothstep(TREES_SWAY.0, TREES_SWAY.1, distance);
-                tree.update(wind, ctx.dt, &mut scene.graph, shown, crate::wind::detail_at(distance));
+                tree.update(wind, ctx.dt, &mut scene.graph, shown, crate::wind::detail_at(distance), crate::wind::every_at(distance));
             }
             if let Some(floor) = &mut self.floor {
                 let player = self.player.feet(&scene.graph);
