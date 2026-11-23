@@ -9,8 +9,10 @@
 //! WILDERNESS_RT=0 draws shadows from shadow maps rather than tracing them, and
 //! WILDERNESS_HARD_SHADOWS=1 traces them with sharp edges; WILDERNESS_STATS=1 logs frame times;
 //! WILDERNESS_VIEW=<yaw>,<pitch> starts the view turned so, in degrees; WILDERNESS_YOCTITE_VIEW=1
-//! shows Yoctite's clusters (=cpu chooses them on the CPU); WILDERNESS_YOCTITE=1 draws the forest
-//! with Yoctite; WILDERNESS_CANDELITE_VIEW=1 shows what Candelite's rays see, =lit with the light on it; WILDERNESS_CANDELITE=1 lights the frame with it (see below);
+//! shows Yoctite's clusters (=cpu chooses them on the CPU); the forest is drawn with Yoctite and
+//! lit with Candelite unless WILDERNESS_CANDELITE=0 (Yoctite alone) or WILDERNESS_YOCTITE=0 (neither:
+//! the renderer draws it); WILDERNESS_CANDELITE_VIEW=1 shows what Candelite's rays see, =lit with the
+//! light on it;
 //! WILDERNESS_WIND=0 stills the wind; WILDERNESS_FLOOR=0 leaves the forest floor
 //! bare.
 
@@ -107,14 +109,15 @@ fn graphics_effects() -> fyrox_gfx::GraphicsEffects {
         _ if std::env::var("WILDERNESS_CANDELITE_VIEW").as_deref() == Ok("lit") => {
             effects = effects.with_candelite_light_view()
         }
-        // WILDERNESS_CANDELITE=1 draws with Yoctite and lights the forest with Candelite's global
-        // illumination: skylight and sunlight bounced between surfaces, in place of the flat
-        // ambient colour.
-        _ if std::env::var("WILDERNESS_CANDELITE").as_deref() == Ok("1") => effects = effects.with_candelite(),
-        // WILDERNESS_YOCTITE=1 draws the forest with Yoctite in place of the renderer: every
-        // tree's clusters at the level of detail they need, chosen and drawn by the GPU.
-        _ if std::env::var("WILDERNESS_YOCTITE").as_deref() == Ok("1") => effects = effects.with_yoctite(),
-        _ => {}
+        // By default the forest is drawn with Yoctite - every tree's clusters at the level of
+        // detail they need, chosen and drawn by the GPU, in place of the renderer - and lit with
+        // Candelite's global illumination: skylight and sunlight bounced between surfaces, in place
+        // of the flat ambient colour (where rays cannot be traced, the ambient colour stays).
+        // WILDERNESS_CANDELITE=0 leaves Candelite out; WILDERNESS_YOCTITE=0 leaves both out, the
+        // renderer drawing the forest itself.
+        _ if std::env::var("WILDERNESS_YOCTITE").as_deref() == Ok("0") => {}
+        _ if std::env::var("WILDERNESS_CANDELITE").as_deref() == Ok("0") => effects = effects.with_yoctite(),
+        _ => effects = effects.with_candelite(),
     }
     if traced_shadows() {
         // WILDERNESS_HARD_SHADOWS=1 traces them with sharp edges, from a sun with no size.
