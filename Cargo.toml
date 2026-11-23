@@ -1,0 +1,27 @@
+[package]
+name = "wilderness"
+version = "0.1.0"
+edition = "2024"
+description = "A first-person walk through a wild forest, on the Hydroxus engine."
+
+# A workspace of its own: Cargo features add up across a workspace, and the engine picks OpenGL
+# whenever anything enables it.
+[workspace]
+
+[dependencies]
+# The engine's wgpu backend only. On Linux wgpu drives Vulkan.
+fyrox = { git = "https://github.com/d4140n-4h3-1/Hydroxus.git", branch = "vulkan", default-features = false, features = ["backend_wgpu"] }
+# Ray-traced shadows, which see through the gaps in leaves and needles; and other graphics
+# improvements kept outside the engine.
+# Reading which of a model's surfaces are double-sided, which the engine's glTF importer drops.
+serde_json = "1"
+# The wind's morph targets are stored as half floats.
+half = "2"
+fyrox-gfx = { git = "https://github.com/d4140n-4h3-1/fyrox-gfx.git", branch = "main", features = ["raytracing"] }
+
+# Optimized engine, debuggable game code. Without this a `cargo run` build is too slow to walk
+# through a forest.
+[profile.dev.package."*"]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
