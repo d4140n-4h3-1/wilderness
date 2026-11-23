@@ -164,6 +164,10 @@ const BANDS: [f32; 5] = [12.0, 20.0, 32.0, 48.0, 75.0];
 /// How much further than its band a plant is taken out again, in meters: walking back and forth
 /// over the line does not put it in and take it out over and over.
 const LINGER: f32 = 6.0;
+/// Between these distances from the player, in meters, a floor plant's sway fades out; past them
+/// it stands still. Too small to see that far off, the sway of thousands of plants was posed
+/// every update - and every one of them bent again for the renderer and the shadows.
+const SWAY: (f32, f32) = (25.0, 40.0);
 /// How many plants and rocks are put into the scene in a frame, at most, walking about.
 const SPAWNS_PER_FRAME: usize = 400;
 /// Lower than this, in meters, a plant casts no shadow: with traced shadows, and with shadow
@@ -346,8 +350,9 @@ impl Floor {
                     continue;
                 }
                 for sway in &mut group.sways {
-                    let detail = wind::detail_at((sway.at() - player.xz()).norm());
-                    sway.update(wind, dt, graph, 1.0, detail);
+                    let distance = (sway.at() - player.xz()).norm();
+                    let shown = 1.0 - crate::random::smoothstep(SWAY.0, SWAY.1, distance);
+                    sway.update(wind, dt, graph, shown, wind::detail_at(distance));
                 }
             }
         }
