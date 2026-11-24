@@ -1,14 +1,21 @@
 //! A day going by, sped up: the sun rising, crossing the sky and setting, then the moon, with the
-//! sky, the light in the shade and the haze following. Off unless WILDERNESS_DAY is set, to test
-//! how the lighting (shadows, Candelite's cached light) keeps up with a moving sun.
+//! sky, the light in the shade and the haze following.
 //!
-//! WILDERNESS_DAY=<minutes a whole day takes>, WILDERNESS_HOUR=<hour it starts at> (default 5,
-//! before sunrise). `[` and `]` step an hour back or forward; `P` pauses the clock.
+//! A whole day takes [`DAY_MINUTES`] and starts at [`START_HOUR`]: WILDERNESS_DAY=<minutes a whole
+//! day takes> and WILDERNESS_HOUR=<hour it starts at> say otherwise, and WILDERNESS_DAY=0 stops
+//! the clock in the afternoon, as the forest was before there were days. Measuring
+//! (WILDERNESS_BENCH), the afternoon stays unless WILDERNESS_DAY is set, so that runs compare.
+//! `[` and `]` step an hour back or forward; `P` pauses the clock.
 
 use fyrox::core::{
     algebra::{UnitQuaternion, Vector3},
     color::Color,
 };
+
+/// How long a whole day takes, in minutes: an hour of it a minute.
+const DAY_MINUTES: f32 = 24.0;
+/// The hour a day starts at: the morning, the day ahead.
+const START_HOUR: f32 = 9.0;
 
 /// How far north the forest is, and how far north the sun is that day (early summer), in degrees.
 const LATITUDE: f32 = 48.0;
@@ -72,11 +79,15 @@ pub struct Lighting {
 impl Day {
     /// The day WILDERNESS_DAY and WILDERNESS_HOUR ask for, if they do.
     pub fn from_env() -> Option<Self> {
-        let minutes: f32 = std::env::var("WILDERNESS_DAY").ok()?.parse().ok().filter(|m: &f32| *m > 0.0)?;
+        let minutes: f32 = match std::env::var("WILDERNESS_DAY") {
+            Ok(minutes) => minutes.parse().ok().filter(|m: &f32| *m > 0.0)?,
+            Err(_) if crate::benchmarking() => return None,
+            Err(_) => DAY_MINUTES,
+        };
         let hour = std::env::var("WILDERNESS_HOUR")
             .ok()
             .and_then(|hour| hour.parse().ok())
-            .unwrap_or(5.0);
+            .unwrap_or(START_HOUR);
         Some(Self { hour: wrap(hour), hours_per_second: 24.0 / (minutes * 60.0), paused: false })
     }
 

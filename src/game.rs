@@ -138,7 +138,7 @@ pub struct Wilderness {
     #[visit(skip)]
     #[reflect(hidden)]
     status: Handle<Text>,
-    /// The time of day going by, under WILDERNESS_DAY; otherwise the afternoon stays.
+    /// The time of day going by (see `day.rs`); none when WILDERNESS_DAY=0, the afternoon staying.
     #[visit(skip)]
     #[reflect(hidden)]
     day: Option<Day>,
@@ -277,7 +277,7 @@ impl Wilderness {
         }
     }
 
-    /// Moves the sun on, and lights the scene for the time of day, under WILDERNESS_DAY.
+    /// Moves the sun on, and lights the scene for the time of day, while days go by.
     fn pass_time(&mut self, ctx: &mut PluginContext) {
         let Some(day) = &mut self.day else {
             return;
