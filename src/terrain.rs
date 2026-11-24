@@ -65,8 +65,28 @@ const SPACING: f32 = 0.5;
 pub const CHUNK: f32 = 108.0;
 /// How far past its banks a channel's cut eases back into the land, as a share of its half width.
 const BANK_EASE: f32 = 1.5;
+/// The river's half width, in meters.
+pub const RIVER_HALF_WIDTH: f32 = 2.6;
+/// Over how many meters before it meets the river a stream's banks ease down to the river's water.
+const JOIN_EASE: f32 = 10.0;
 /// How far below the banks the water is, as a share of a channel's depth: as the tool lays it.
 const WATER_DOWN: f32 = 0.55;
+/// Manning's formula, v = R^(2/3) S^(1/2) / n, its R and n taken as a woodland channel's (a third
+/// of a meter deep, n 0.035): v = MANNING x the square root of the slope, in meters a second. And
+/// the slowest and fastest the water is let run.
+const MANNING: f32 = 13.7;
+const SLOWEST: f32 = 0.25;
+const FASTEST: f32 = 3.0;
+/// Over how far either side the slope a channel's water runs down is measured, in meters.
+const SLOPE_OVER: f32 = 4.0;
+/// The Birch Glade's shelves along the waterline (its `shape_banks`): how far into the water and
+/// out of it the bank is reshaped, in meters; how steeply it falls into the water and rises out of
+/// it; and how deep the water is beyond the shelf.
+const SHELF_IN: f32 = 0.72;
+const SHELF_OUT: f32 = 0.73;
+const SHELF_FALL: f32 = 0.37;
+const SHELF_RISE: f32 = 0.52;
+const BEYOND_SHELF: f32 = 0.28;
 
 /// A river or a stream: the line it runs along, downstream, and how wide and deep it is cut.
 #[derive(Debug, Clone, PartialEq)]
@@ -79,6 +99,14 @@ pub struct Channel {
     /// How far its cut reaches either side of its middle, and how deep it is there, in meters.
     pub half_width: f32,
     pub depth: f32,
+    /// How far downstream each point is, in meters.
+    pub distances: Vec<f32>,
+    /// Where its water meets each bank at each point, from the middle, in meters: the right bank
+    /// (looking downstream: toward -side, see [`side_of`]) then the left. Each bank wanders on its
+    /// own, as the Birch Glade's seeded shorelines do.
+    pub waterlines: Vec<[f32; 2]>,
+    /// How steeply its water falls at each point, over a few meters either side.
+    pub slopes: Vec<f32>,
 }
 
 impl Channel {
@@ -87,22 +115,51 @@ impl Channel {
         self.banks[index] - self.depth * WATER_DOWN
     }
 
-    /// How far either side of the middle the water reaches: where the cut's bed comes up to it.
-    pub fn water_half_width(&self) -> f32 {
-        // The bed is `depth * (1 - (d / w)^2)^2` below the banks: up at the water where that is
-        // WATER_DOWN of the depth.
-        self.half_width * (1.0 - WATER_DOWN.sqrt()).sqrt()
+    /// How far past its waterlines its water's ribbon reaches under the banks, in meters: as the
+    /// Birch Glade lays it, so that the ground, not the ribbon's edge, makes the water's edge.
+    pub fn under_banks(&self) -> f32 {
+        self.half_width * 0.13 + 0.12
+    }
+
+    /// How fast its water runs at its `index`th point, in meters a second: as gravity drives a
+    /// channel's water down its fall, by Manning's formula, the speed growing as the square root
+    /// of the slope (a channel's roughness and depth taken as a woodland stream's).
+    pub fn speed(&self, index: usize) -> f32 {
+        (MANNING * self.slopes[index].max(0.0).sqrt()).clamp(SLOWEST, FASTEST)
     }
 }
 
-/// Where a channel runs past a place: which channel, how far from its middle, and the bank and
-/// water heights there.
+/// Across the line `points` at its `i`th point: a unit vector, to the left looking downstream.
+pub fn side_of(points: &[Vector2<f32>], i: usize) -> Vector2<f32> {
+    let tangent = points[(i + 1).min(points.len() - 1)] - points[i.saturating_sub(1)];
+    Vector2::new(-tangent.y, tangent.x).try_normalize(1e-6).unwrap_or(Vector2::x())
+}
+
+/// Where a place lies against a channel: by its nearest segment.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Nearest {
-    pub channel: usize,
-    pub distance: f32,
+pub struct Near {
+    /// That segment's first point, and how far along it toward the next.
+    pub index: usize,
+    pub t: f32,
+    /// How far from the middle line, and to which side: positive to the left, looking downstream.
+    pub across: f32,
+    /// How far downstream.
+    pub along: f32,
     pub bank: f32,
     pub water: f32,
+    /// Where the water meets the bank on that side, from the middle.
+    pub waterline: f32,
+}
+
+impl Near {
+    pub fn distance(&self) -> f32 {
+        self.across.abs()
+    }
+
+    /// How far past the waterline, out of the water (negative: in it).
+    pub fn from_waterline(&self) -> f32 {
+        self.across.abs() - self.waterline
+    }
 }
 
 /// How wide the cells are in which channels' segments are found, in meters.
@@ -144,7 +201,8 @@ impl Terrain {
                 Vector2::new(terrain.river_x(z), z)
             })
             .collect();
-        terrain.add_channel("River", river, 2.6, 0.85);
+        let mut shores = Random(seed ^ 0x5e0e_1a3d_2741_0000);
+        terrain.add_channel("River", river, RIVER_HALF_WIDTH, 0.85, &mut shores);
 
         // The streams, each from a spring on a hillside, on alternate sides.
         for stream in 0..STREAMS {
@@ -154,9 +212,54 @@ impl Terrain {
             let spring = Vector2::new(terrain.river_x(z) + side * away, z);
             let points = terrain.trace_down(spring);
             const NAMES: [&str; STREAMS] = ["Stream", "Second stream", "Third stream"];
-            terrain.add_channel(NAMES[stream], points, 1.1, 0.45);
+            terrain.add_channel(NAMES[stream], points, 1.1, 0.45, &mut shores);
+            terrain.lower_into_river(terrain.channels.len() - 1);
+        }
+        for channel in &mut terrain.channels {
+            channel.slopes = slopes_of(channel);
         }
         terrain
+    }
+
+    /// Eases a stream's banks down over its last meters, so that its water comes to the river's
+    /// height where they meet, as plant_life's water join tool eases a tributary into the river.
+    fn lower_into_river(&mut self, stream: usize) {
+        let end = *self.channels[stream].points.last().expect("a stream has points");
+        let Some((_, river_water)) = self.along(0, end.x, end.y) else {
+            return;
+        };
+        let channel = &mut self.channels[stream];
+        let target = river_water + channel.depth * WATER_DOWN;
+        let mut from_end = 0.0;
+        for i in (0..channel.points.len()).rev() {
+            if i + 1 < channel.points.len() {
+                from_end += (channel.points[i + 1] - channel.points[i]).norm();
+            }
+            let ease = smoothstep(JOIN_EASE, 0.0, from_end);
+            let bank = channel.banks[i];
+            channel.banks[i] = bank + (target.min(bank) - bank) * ease;
+        }
+        // Still never rising downstream.
+        for i in 1..channel.banks.len() {
+            channel.banks[i] = channel.banks[i].min(channel.banks[i - 1]);
+        }
+    }
+
+    /// Where `x`, `z` lies against the channel `channel`, if within its cut and the easing past it.
+    pub fn near(&self, channel: usize, x: f32, z: f32) -> Option<Near> {
+        let mut found = None;
+        self.each_near(x, z, |c, near| {
+            if c == channel {
+                found = Some(near);
+            }
+        });
+        found
+    }
+
+    /// How far `x`, `z` is from the middle of the channel `channel`, and the height of its water
+    /// there, if it is within its cut and the easing past it.
+    pub fn along(&self, channel: usize, x: f32, z: f32) -> Option<(f32, f32)> {
+        self.near(channel, x, z).map(|n| (n.distance(), n.water))
     }
 
     fn meander(&self, z: f32) -> f32 {
@@ -180,72 +283,95 @@ impl Terrain {
     /// The ground's height at `x`, `z`: the land, with the channels cut into it.
     pub fn height(&self, x: f32, z: f32) -> f32 {
         let land = self.land(x, z);
-        let mut height = land;
-        self.each_near(x, z, |channel, distance, bank| {
-            let w = channel.half_width;
-            let cut = if distance < w {
+        let mut cut = land;
+        self.each_near(x, z, |channel, near| {
+            let channel = &self.channels[channel];
+            let (w, distance, bank) = (channel.half_width, near.distance(), near.bank);
+            let here = if distance < w {
                 let share = 1.0 - (distance / w).powi(2);
                 bank - channel.depth * share * share
             } else {
                 // Past the bank, easing back up to the land, where the bank is lower than it.
                 bank + (land - bank).max(0.0) * smoothstep(w, w * (1.0 + BANK_EASE), distance)
             };
-            height = height.min(cut);
+            cut = cut.min(here);
         });
-        height
-    }
-
-    /// The channel running nearest past `x`, `z`, within its cut, if any.
-    pub fn nearest(&self, x: f32, z: f32) -> Option<Nearest> {
-        let mut nearest: Option<Nearest> = None;
-        self.each_near_indexed(x, z, |channel, distance, bank, water| {
-            if nearest.is_none_or(|n| distance < n.distance) {
-                nearest = Some(Nearest { channel, distance, bank, water });
+        // Then the shelves along each waterline, as the Birch Glade shapes them: a shallow slope
+        // into the water, gravel to wade on, and a steeper rise out of it; deeper beyond.
+        let mut shaped: Option<f32> = None;
+        self.each_near(x, z, |channel, near| {
+            let channel = &self.channels[channel];
+            let offset = near.from_waterline();
+            let total = *channel.distances.last().expect("a channel has points");
+            let ends = (near.along / 0.7).min((total - near.along) / 0.7).clamp(0.0, 1.0);
+            let mut target = cut;
+            if offset > -SHELF_IN && offset < SHELF_OUT {
+                let influence = ((offset + SHELF_IN) / 0.44).min((SHELF_OUT - offset) / 0.43).min(1.0) * ends;
+                let profile = near.water + offset * if offset < 0.0 { SHELF_FALL } else { SHELF_RISE };
+                target = cut + (profile - cut) * influence;
             }
+            // Past the shelf, down to deeper water, from the shelf as it eases off.
+            if offset < -BEYOND_SHELF {
+                let deep = target.min(near.water - BEYOND_SHELF);
+                target += (deep - target) * smoothstep(-BEYOND_SHELF, -SHELF_IN, offset) * ends;
+            }
+            shaped = Some(shaped.map_or(target, |s: f32| s.min(target)));
         });
-        nearest
+        shaped.unwrap_or(cut)
     }
 
     /// Whether `x`, `z` is under water, or nearer to it than `margin` meters.
     pub fn wet(&self, x: f32, z: f32, margin: f32) -> bool {
         let mut wet = false;
-        self.each_near_indexed(x, z, |channel, distance, _, _| {
-            wet |= distance < self.channels[channel].water_half_width() + margin;
-        });
+        self.each_near(x, z, |_, near| wet |= near.from_waterline() < margin);
         wet
     }
 
-    /// Calls `visit` with each channel whose cut (and the easing past it) reaches `x`, `z`: how
-    /// far its nearest segment's middle line is, and the bank height there.
-    fn each_near(&self, x: f32, z: f32, mut visit: impl FnMut(&Channel, f32, f32)) {
-        self.each_near_indexed(x, z, |channel, distance, bank, _| visit(&self.channels[channel], distance, bank));
-    }
-
-    fn each_near_indexed(&self, x: f32, z: f32, mut visit: impl FnMut(usize, f32, f32, f32)) {
+    /// Calls `visit` with each channel whose cut (and the easing past it) reaches `x`, `z`, and
+    /// where the place lies against it.
+    fn each_near(&self, x: f32, z: f32, mut visit: impl FnMut(usize, Near)) {
         let Some(segments) = self.cells.get(&cell_of(x, z)) else {
             return;
         };
         // Each channel's nearest segment.
-        let mut best = [(f32::MAX, 0.0, 0.0); MOST_CHANNELS];
+        let mut best: [Option<(f32, usize, f32)>; MOST_CHANNELS] = [None; MOST_CHANNELS];
         let at = Vector2::new(x, z);
         for &(channel, first) in segments {
             let c = &self.channels[channel as usize];
-            let (i, j) = (first as usize, first as usize + 1);
-            let (a, b) = (c.points[i], c.points[j]);
+            let i = first as usize;
+            let (a, b) = (c.points[i], c.points[i + 1]);
             let along = b - a;
             let t = ((at - a).dot(&along) / along.norm_squared().max(1e-8)).clamp(0.0, 1.0);
             let distance = (at - (a + along * t)).norm();
             let slot = &mut best[channel as usize];
-            if distance < slot.0 {
-                let bank = c.banks[i] + (c.banks[j] - c.banks[i]) * t;
-                let water = c.water(i) + (c.water(j) - c.water(i)) * t;
-                *slot = (distance, bank, water);
+            if slot.is_none_or(|(d, _, _)| distance < d) {
+                *slot = Some((distance, i, t));
             }
         }
-        for (channel, &(distance, bank, water)) in best.iter().enumerate().take(self.channels.len()) {
-            if distance < f32::MAX {
-                visit(channel, distance, bank, water);
-            }
+        for (channel, found) in best.iter().enumerate().take(self.channels.len()) {
+            let Some((_, i, t)) = *found else {
+                continue;
+            };
+            let c = &self.channels[channel];
+            let j = i + 1;
+            let (a, b) = (c.points[i], c.points[j]);
+            let middle = a + (b - a) * t;
+            let left = (b - a).try_normalize(1e-6).map_or(Vector2::x(), |d| Vector2::new(-d.y, d.x));
+            let across = (at - middle).dot(&left);
+            let side = (across >= 0.0) as usize;
+            let lerp = |p: f32, q: f32| p + (q - p) * t;
+            visit(
+                channel,
+                Near {
+                    index: i,
+                    t,
+                    across,
+                    along: lerp(c.distances[i], c.distances[j]),
+                    bank: lerp(c.banks[i], c.banks[j]),
+                    water: lerp(c.water(i), c.water(j)),
+                    waterline: lerp(c.waterlines[i][side], c.waterlines[j][side]),
+                },
+            );
         }
     }
 
@@ -253,7 +379,8 @@ impl Terrain {
     /// it reaches the river; caught in a hollow, straight on to the river. Smoothed, as the tool's
     /// channels are, of the grid's zigzag.
     fn trace_down(&self, spring: Vector2<f32>) -> Vec<Vector2<f32>> {
-        let reached = |p: Vector2<f32>| (p.x - self.river_x(p.y)).abs() < 2.6 * 0.8;
+        // Into the river's water, which the stream's own is then cut back to (see `water.rs`).
+        let reached = |p: Vector2<f32>| (p.x - self.river_x(p.y)).abs() < RIVER_HALF_WIDTH * 0.2;
         let mut path = vec![spring];
         let mut at = spring;
         let half = half_size() - 1.0;
@@ -313,13 +440,33 @@ impl Terrain {
 
     /// Adds a channel along `points`: its banks at the land's height, never rising downstream; and
     /// its segments to the grid, wherever its cut and the easing past it reach.
-    fn add_channel(&mut self, name: &'static str, points: Vec<Vector2<f32>>, half_width: f32, depth: f32) {
+    fn add_channel(&mut self, name: &'static str, points: Vec<Vector2<f32>>, half_width: f32, depth: f32, shores: &mut Random) {
         let mut banks = Vec::with_capacity(points.len());
         let mut lowest = f32::MAX;
         for p in &points {
             lowest = lowest.min(self.land(p.x, p.y));
             banks.push(lowest);
         }
+        let mut distances = Vec::with_capacity(points.len());
+        let mut distance = 0.0;
+        for (i, p) in points.iter().enumerate() {
+            if i > 0 {
+                distance += (p - points[i - 1]).norm();
+            }
+            distances.push(distance);
+        }
+        // Each bank wanders on its own at three scales, as the Birch Glade's seeded shorelines.
+        let phases: [[f32; 3]; 2] = std::array::from_fn(|_| std::array::from_fn(|_| shores.between(0.0, std::f32::consts::TAU)));
+        let waterlines = distances
+            .iter()
+            .map(|&d| {
+                std::array::from_fn(|side| {
+                    let [broad, middle, fine] = phases[side];
+                    half_width
+                        * (0.49 + 0.075 * (0.86 * d + broad).sin() + 0.038 * (1.74 * d + middle).sin() + 0.017 * (3.4 * d + fine).sin())
+                })
+            })
+            .collect();
         let index = self.channels.len() as u32;
         let reach = half_width * (1.0 + BANK_EASE);
         for i in 0..points.len().saturating_sub(1) {
@@ -332,7 +479,8 @@ impl Terrain {
                 }
             }
         }
-        self.channels.push(Channel { name, points, banks, half_width, depth });
+        let slopes = vec![0.0; points.len()];
+        self.channels.push(Channel { name, points, banks, half_width, depth, distances, waterlines, slopes });
     }
 
     /// Puts the ground into `graph`, in squares drawn with `material`, solid underfoot. Returns
@@ -408,6 +556,21 @@ impl Terrain {
     }
 }
 
+/// How steeply `channel`'s water falls at each point: the drop of its water over [`SLOPE_OVER`]
+/// meters either side, over that run.
+fn slopes_of(channel: &Channel) -> Vec<f32> {
+    let n = channel.points.len();
+    (0..n)
+        .map(|i| {
+            let d = channel.distances[i];
+            let upstream = (0..=i).rev().find(|&k| d - channel.distances[k] >= SLOPE_OVER).unwrap_or(0);
+            let downstream = (i..n).find(|&k| channel.distances[k] - d >= SLOPE_OVER).unwrap_or(n - 1);
+            let run = channel.distances[downstream] - channel.distances[upstream];
+            if run <= 1e-3 { 0.0 } else { (channel.water(upstream) - channel.water(downstream)) / run }
+        })
+        .collect()
+}
+
 fn cell_of(x: f32, z: f32) -> (i32, i32) {
     ((x / CELL).floor() as i32, (z / CELL).floor() as i32)
 }
@@ -437,7 +600,11 @@ mod tests {
             assert_eq!(terrain.channels.len(), 1 + STREAMS);
             for stream in &terrain.channels[1..] {
                 let end = *stream.points.last().unwrap();
-                assert!((end.x - terrain.river_x(end.y)).abs() < 2.6, "seed {seed}: {} ends at {end:?}", stream.name);
+                assert!(terrain.near(0, end.x, end.y).is_some_and(|n| n.from_waterline() < 0.0), "seed {seed}: {} ends at {end:?}", stream.name);
+                // Its water comes down to the river's where they meet.
+                let (_, river_water) = terrain.along(0, end.x, end.y).expect("at the river");
+                let stream_water = stream.water(stream.points.len() - 1);
+                assert!((stream_water - river_water).abs() < 0.02, "seed {seed}: {} water {stream_water}, river {river_water}", stream.name);
                 assert!(stream.points.len() > 20, "seed {seed}: {} is {} points", stream.name, stream.points.len());
                 assert!(stream.banks.windows(2).all(|w| w[1] <= w[0]));
             }
@@ -450,7 +617,7 @@ mod tests {
         assert!(!terrain.wet(0.0, 0.0, 1.0));
         let p = terrain.channels[0].points[100];
         assert!(terrain.wet(p.x, p.y, 0.0));
-        assert!(terrain.nearest(p.x, p.y).is_some_and(|n| n.channel == 0 && n.distance < 0.5));
+        assert!(terrain.along(0, p.x, p.y).is_some_and(|(distance, _)| distance < 0.5));
     }
 
     #[test]

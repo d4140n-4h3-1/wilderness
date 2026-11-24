@@ -166,6 +166,8 @@ const BANDS: [f32; 5] = [12.0, 20.0, 32.0, 48.0, 75.0];
 /// the water.
 const PLANTS_OFF_WATER: f32 = 0.1;
 const ROCKS_IN_WATER: f32 = 0.25;
+/// About how many meters of river there are to each boulder standing in it.
+const RIVER_BOULDER_EVERY: f32 = 30.0;
 /// How much further than its band a plant is taken out again, in meters: walking back and forth
 /// over the line does not put it in and take it out over and over.
 const LINGER: f32 = 6.0;
@@ -525,6 +527,8 @@ fn lay_out(seed: u64, terrain: &Terrain, trees: &[Tree]) -> Vec<Chunk> {
         }
     }
 
+    shores(seed, terrain, &thicket, &mut obstacles, &mut chunks, extent, across);
+
     for (index, chunk) in chunks.iter_mut().enumerate() {
         let mut random = Random::for_place(seed, index as i64, 2);
         for _ in 0..(MOST_PLANTS * CHUNK * CHUNK).round() as usize {
@@ -570,6 +574,83 @@ fn lay_out(seed: u64, terrain: &Terrain, trees: &[Tree]) -> Vec<Chunk> {
         }
     }
     chunks
+}
+
+/// The shores, as the Birch Glade scatters them along its seeded waterlines: gravel in uneven bars
+/// along each bank, some of it in the water, with gaps between; hard fern and wood melick in
+/// clumps a little up the bank where the gravel is thickest; and now and then a boulder standing
+/// in the river.
+fn shores(seed: u64, terrain: &Terrain, thicket: &Thicket, obstacles: &mut Obstacles, chunks: &mut [Chunk], extent: f32, across: usize) {
+    let index_of = |kind: &str| kinds().position(|k| k.name == kind).expect("a floor kind");
+    let (cobble, boulder) = (index_of("Granite cobble"), index_of("Granite boulder"));
+    let (fern, melick) = (index_of("Hard fern"), index_of("Wood melick"));
+    let place = |chunks: &mut [Chunk], kind: usize, at: Vector2<f32>, yaw: f32, scale: f32| {
+        if at.x.abs() >= extent || at.y.abs() >= extent {
+            return;
+        }
+        let column = (((at.x + extent) / CHUNK) as usize).min(across - 1);
+        let row = (((at.y + extent) / CHUNK) as usize).min(across - 1);
+        chunks[row * across + column].placements.push(Placement {
+            kind,
+            position: Vector3::new(at.x, terrain.height(at.x, at.y), at.y),
+            yaw,
+            scale,
+            shelter: 1.0 - 0.6 * thicket.at(at.x, at.y),
+        });
+    };
+    for (c, channel) in terrain.channels.iter().enumerate() {
+        let total = *channel.distances.last().expect("a channel has points");
+        for side in 0..2 {
+            let mut random = Random::for_place(seed, c as i64, 0x5407 + side as i64);
+            let phase = random.between(0.0, std::f32::consts::TAU);
+            for (i, &middle) in channel.points.iter().enumerate() {
+                let along = channel.distances[i];
+                // Not within the river where a stream has run into it, nor at a channel's ends.
+                if along < 0.5 || along > total - 0.65 || (c > 0 && terrain.near(0, middle.x, middle.y).is_some_and(|n| n.from_waterline() < 0.5)) {
+                    continue;
+                }
+                let patch = 0.50 + 0.30 * (0.72 * along + phase).sin() + 0.20 * (1.83 * along - phase).sin();
+                if random.unit() > 0.12 + 0.70 * patch {
+                    continue;
+                }
+                let outward = crate::terrain::side_of(&channel.points, i) * if side == 0 { -1.0 } else { 1.0 };
+                let edge = middle + outward * channel.waterlines[i][side];
+                for _ in 0..1 + (random.unit() * 3.0) as usize {
+                    let at = edge
+                        + outward * random.between(-0.31, 0.58)
+                        + Vector2::new(random.between(-0.2, 0.2), random.between(-0.2, 0.2));
+                    let size = random.between(0.25, 0.79).powi(2);
+                    let yaw = random.between(0.0, std::f32::consts::TAU);
+                    obstacles.add(at, ROCKS[2].kind.radius * size * 0.8);
+                    place(chunks, cobble, at, yaw, size);
+                }
+                if patch > 0.56 && random.unit() < 0.48 {
+                    let at = edge + outward * random.between(0.54, 1.25);
+                    let kind = if random.unit() < 0.4 { fern } else { melick };
+                    let scale = random.between(0.42, 0.86);
+                    let yaw = random.between(0.0, std::f32::consts::TAU);
+                    if !terrain.wet(at.x, at.y, PLANTS_OFF_WATER) && !obstacles.blocked(at, 0.3 * PLANTS[kind].radius * scale) {
+                        place(chunks, kind, at, yaw, scale);
+                    }
+                }
+            }
+        }
+    }
+    // Boulders in the river, about one every RIVER_BOULDER_EVERY meters, in its water.
+    let river = &terrain.channels[0];
+    let mut random = Random::for_place(seed, 0, 0xb01d);
+    for (i, &middle) in river.points.iter().enumerate() {
+        if random.unit() * RIVER_BOULDER_EVERY > 1.0 {
+            continue;
+        }
+        let side = (random.unit() < 0.5) as usize;
+        let outward = crate::terrain::side_of(&river.points, i) * if side == 0 { -1.0 } else { 1.0 };
+        let at = middle + outward * river.waterlines[i][side] * random.between(0.2, 0.7);
+        let scale = random.between(0.65, 0.98);
+        let yaw = random.between(0.0, std::f32::consts::TAU);
+        obstacles.add(at, ROCKS[0].kind.radius * scale);
+        place(chunks, boulder, at, yaw, scale);
+    }
 }
 
 #[cfg(test)]
@@ -619,5 +700,30 @@ mod tests {
             println!("{}: {}", kind.name, placements.iter().filter(|p| p.kind == index).count());
         }
         println!("all: {}", placements.len());
+    }
+
+    #[test]
+    fn gravel_lines_the_shores_and_boulders_stand_in_the_river() {
+        let terrain = Terrain::new(1);
+        let trees = forest::lay_out(1, &terrain);
+        let placements: Vec<Placement> = lay_out(1, &terrain, &trees).into_iter().flat_map(|c| c.placements).collect();
+        let named = |p: &Placement, name: &str| p.kind().name == name;
+        let at_shore = |p: &Placement| {
+            terrain.channels.iter().enumerate().any(|(c, _)| {
+                terrain.near(c, p.position.x, p.position.z).is_some_and(|n| n.from_waterline().abs() < 1.0)
+            })
+        };
+        let shore_gravel = placements.iter().filter(|p| named(p, "Granite cobble") && at_shore(p)).count();
+        let river_length = *terrain.channels[0].distances.last().unwrap();
+        assert!(shore_gravel as f32 > river_length, "only {shore_gravel} cobbles along {river_length} m of river");
+        let in_river = placements
+            .iter()
+            .filter(|p| named(p, "Granite boulder") && terrain.near(0, p.position.x, p.position.z).is_some_and(|n| n.from_waterline() < 0.0))
+            .count();
+        assert!(in_river >= 4, "{in_river} boulders in the river");
+        // No plant in the water.
+        for p in placements.iter().filter(|p| p.kind < PLANTS.len()) {
+            assert!(!terrain.wet(p.position.x, p.position.z, 0.0), "{} in the water at {:?}", p.kind().name, p.position);
+        }
     }
 }
