@@ -118,6 +118,16 @@ impl Player {
         (camera.look_vector(), -camera.side_vector())
     }
 
+    /// The camera, which looks along its +z with +x to the left of the screen.
+    pub fn camera(&self) -> Handle<Node> {
+        self.camera
+    }
+
+    /// The view's turn about the vertical and its tip down, in radians.
+    pub fn yaw_pitch(&self) -> (f32, f32) {
+        (self.yaw, self.pitch)
+    }
+
     /// Turns the view to `yaw` about the vertical and `pitch` down, in radians.
     pub fn set_view(&mut self, yaw: f32, pitch: f32) {
         self.yaw = yaw;

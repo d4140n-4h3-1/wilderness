@@ -2,7 +2,9 @@
 //! it.
 
 use crate::{
+    day::Day,
     floor::{self, Floor},
+    flashlight::Flashlight,
     hud::WindGauge,
     forest::{self, SPECIES},
     models::{self, Prepared},
@@ -38,7 +40,7 @@ use fyrox::{
         node::Node,
         light::{
             BaseLightBuilder,
-            directional::{CsmOptions, DirectionalLightBuilder, FrustumSplitOptions},
+            directional::{CsmOptions, DirectionalLight, DirectionalLightBuilder, FrustumSplitOptions},
         },
         mesh::{
             Mesh, MeshBuilder,
@@ -85,7 +87,7 @@ pub const BORDER: f32 = 12.0;
 /// at all, between, less and less.
 const TREES_SWAY: (f32, f32) = (60.0, 85.0);
 /// What the help line says once the forest has grown.
-const HELP: &str = "WASD walk  ·  Shift run  ·  Space jump  ·  Click to look around  ·  Esc free the mouse";
+const HELP: &str = "WASD walk  ·  Shift run  ·  Space jump  ·  F flashlight  ·  Click to look around  ·  Esc free the mouse";
 
 #[derive(Default, Debug, PartialEq, Visit, Reflect)]
 #[reflect(non_cloneable, type_uuid = "6f1c2b7e-4a5d-4e8b-9c3a-1d2e7f80a915")]
@@ -129,6 +131,20 @@ pub struct Wilderness {
     #[visit(skip)]
     #[reflect(hidden)]
     status: Handle<Text>,
+    /// The time of day going by, under WILDERNESS_DAY; otherwise the afternoon stays.
+    #[visit(skip)]
+    #[reflect(hidden)]
+    day: Option<Day>,
+    #[visit(skip)]
+    #[reflect(hidden)]
+    sun: Handle<DirectionalLight>,
+    #[visit(skip)]
+    #[reflect(hidden)]
+    flashlight: Flashlight,
+    /// What the status line says, the clock included.
+    #[visit(skip)]
+    #[reflect(hidden)]
+    shown_status: String,
 }
 
 impl Wilderness {
@@ -141,7 +157,7 @@ impl Wilderness {
 
         // A directional light shines down its own -y; tipped over by the sun's angle from
         // straight up, then turned to its bearing.
-        DirectionalLightBuilder::new(
+        self.sun = DirectionalLightBuilder::new(
             BaseLightBuilder::new(
                 BaseBuilder::new().with_name("Sun").with_local_transform(
                     TransformBuilder::new()
@@ -166,6 +182,12 @@ impl Wilderness {
         })
         .build(&mut scene.graph);
 
+        self.day = Day::from_env();
+        if self.day.is_some() {
+            // The built-in sky is a picture of day; a plain colour, changing, stands for the sky.
+            scene.set_skybox(None);
+        }
+
         self.ground = build_ground(&mut scene.graph);
         // WILDERNESS_SPAWN=<x>,<z> starts the player there, in meters, rather than in the
         // clearing in the middle: a glade in the sun, say, to see shadows.
@@ -177,6 +199,7 @@ impl Wilderness {
             })
             .unwrap_or_else(Vector3::zeros);
         self.player = Player::spawn(&mut scene.graph, spawn);
+        self.flashlight = Flashlight::build(&mut scene.graph, self.player.camera());
         // WILDERNESS_VIEW=<yaw>,<pitch> starts the view turned so, in degrees (pitch down), for
         // screenshots taken the same way each time.
         if let Some((yaw, pitch)) = std::env::var("WILDERNESS_VIEW").ok().and_then(|view| {
@@ -208,6 +231,33 @@ impl Wilderness {
         .with_text("The forest is growing...")
         .build(&mut ui.build_ctx());
         self.gauge = WindGauge::build(ui);
+    }
+
+    /// Moves the sun on, and lights the scene for the time of day, under WILDERNESS_DAY.
+    fn pass_time(&mut self, ctx: &mut PluginContext) {
+        let Some(day) = &mut self.day else {
+            return;
+        };
+        day.advance(ctx.dt);
+        let lit = day.lighting();
+        let scene = &mut ctx.scenes[self.scene];
+        scene.rendering_options.ambient_lighting_color = lit.ambient;
+        scene.rendering_options.clear_color = Some(lit.sky);
+        if let Some(fog) = &mut scene.rendering_options.fog {
+            fog.color = lit.haze;
+        }
+        let sun = &mut scene.graph[self.sun];
+        sun.local_transform_mut().set_rotation(lit.rotation);
+        let light = sun.base_light_mut();
+        light.set_color(lit.color);
+        light.set_intensity(lit.strength);
+        if self.planted {
+            let status = format!("{HELP}\n{}  ·  [ ] step an hour  ·  P pause", self.day.as_ref().unwrap().clock());
+            if status != self.shown_status {
+                self.set_status(ctx, &status);
+                self.shown_status = status;
+            }
+        }
     }
 
     fn set_status(&self, ctx: &mut PluginContext, text: &str) {
@@ -448,11 +498,13 @@ impl Plugin for Wilderness {
     }
 
     fn update(&mut self, ctx: &mut PluginContext) -> GameResult {
+        self.pass_time(ctx);
         if !self.plant_when_loaded(ctx) {
             return Ok(());
         }
         let scene = &mut ctx.scenes[self.scene];
         self.player.update(&mut scene.graph, ctx.dt);
+        self.flashlight.update(&mut scene.graph, self.player.yaw_pitch(), ctx.dt);
         let started = std::time::Instant::now();
         if let Some(wind) = &mut self.wind {
             wind.update(ctx.dt);
@@ -481,10 +533,15 @@ impl Plugin for Wilderness {
             && (ctx.elapsed_time - ctx.dt).floor() != ctx.elapsed_time.floor()
         {
             Log::info(format!(
-                "Player at {:?}; {} of the floor's plants and rocks in the scene; wind and floor {:.2} ms",
+                "Player at {:?}; {} of the floor's plants and rocks in the scene; wind and floor {:.2} ms{}",
                 self.player.feet(graph),
                 self.floor.as_ref().map_or(0, Floor::spawned),
                 started.elapsed().as_secs_f32() * 1000.0,
+                self.day.as_ref().map_or(String::new(), |day| format!(
+                    "; {} sun {:.1}°",
+                    day.clock(),
+                    day.lighting().elevation
+                )),
             ));
         }
         log_stats(ctx);
@@ -518,6 +575,16 @@ impl Plugin for Wilderness {
                     let down = *state == ElementState::Pressed;
                     if *key == KeyCode::Escape && down {
                         self.set_mouse_captured(&mut ctx, false);
+                    } else if *key == KeyCode::KeyF && down {
+                        self.flashlight.toggle(&mut ctx.scenes[self.scene].graph);
+                    } else if let (Some(day), true, KeyCode::BracketLeft | KeyCode::BracketRight | KeyCode::KeyP) =
+                        (&mut self.day, down, key)
+                    {
+                        match key {
+                            KeyCode::BracketLeft => day.step(-1.0),
+                            KeyCode::BracketRight => day.step(1.0),
+                            _ => day.toggle_pause(),
+                        }
                     } else {
                         self.player.key(*key, down);
                     }
