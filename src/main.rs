@@ -26,6 +26,8 @@ mod lantern;
 mod models;
 mod player;
 mod random;
+mod terrain;
+mod water;
 mod wind;
 
 use fyrox::{

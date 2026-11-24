@@ -14,6 +14,7 @@
 
 use crate::{
     forest::{self, Thicket, Tree},
+    terrain::Terrain,
     models::{Prepared, mesh_of},
     random::{Noise, Random, smoothstep},
     wind::{self, Profile, Sway, Wind},
@@ -161,6 +162,10 @@ const REACH: (f32, f32) = (10.0, 75.0);
 /// The distances plants are put into the scene within, in meters, each plant at the first not
 /// short of its reach: the plants of a chunk come and go together, a band at a time.
 const BANDS: [f32; 5] = [12.0, 20.0, 32.0, 48.0, 75.0];
+/// How far from the water's edge plants keep, in meters; and the share of rocks that may lie in
+/// the water.
+const PLANTS_OFF_WATER: f32 = 0.1;
+const ROCKS_IN_WATER: f32 = 0.25;
 /// How much further than its band a plant is taken out again, in meters: walking back and forth
 /// over the line does not put it in and take it out over and over.
 const LINGER: f32 = 6.0;
@@ -241,10 +246,18 @@ pub struct Floor {
 }
 
 impl Floor {
-    /// Lays out the floor among `trees`. The same seed lays out the same floor.
-    pub fn lay_out(seed: u64, trees: &[Tree], models: Vec<ModelResource>, double_sided: Vec<Vec<bool>>, wind: bool) -> Self {
+    /// Lays out the floor among `trees`, on `terrain`'s ground and out of its water. The same
+    /// seed lays out the same floor.
+    pub fn lay_out(
+        seed: u64,
+        terrain: &Terrain,
+        trees: &[Tree],
+        models: Vec<ModelResource>,
+        double_sided: Vec<Vec<bool>>,
+        wind: bool,
+    ) -> Self {
         Self {
-            chunks: lay_out(seed, trees),
+            chunks: lay_out(seed, terrain, trees),
             models,
             double_sided,
             wind,
@@ -449,8 +462,9 @@ impl Obstacles {
     }
 }
 
-/// Lays out every chunk's plants and rocks among `trees`.
-fn lay_out(seed: u64, trees: &[Tree]) -> Vec<Chunk> {
+/// Lays out every chunk's plants and rocks among `trees`, on `terrain`: the plants out of the
+/// water, the rocks mostly.
+fn lay_out(seed: u64, terrain: &Terrain, trees: &[Tree]) -> Vec<Chunk> {
     let extent = extent();
     let across = (2.0 * extent / CHUNK).ceil() as usize;
     let thicket = Thicket::new(seed);
@@ -496,13 +510,14 @@ fn lay_out(seed: u64, trees: &[Tree]) -> Vec<Chunk> {
             let kind = &ROCKS[rock].kind;
             let scale = random.between(kind.scale.0, kind.scale.1);
             let radius = kind.radius * scale * 0.8;
-            if obstacles.blocked(at, radius) {
+            // A rock in the water now and then, as stones lie in a stream bed.
+            if obstacles.blocked(at, radius) || (terrain.wet(at.x, at.y, 0.0) && random.unit() > ROCKS_IN_WATER) {
                 continue;
             }
             obstacles.add(at, radius);
             chunk.placements.push(Placement {
                 kind: PLANTS.len() + rock,
-                position: Vector3::new(at.x, 0.0, at.y),
+                position: Vector3::new(at.x, terrain.height(at.x, at.y), at.y),
                 yaw: random.between(0.0, std::f32::consts::TAU),
                 scale,
                 shelter: 1.0,
@@ -514,7 +529,7 @@ fn lay_out(seed: u64, trees: &[Tree]) -> Vec<Chunk> {
         let mut random = Random::for_place(seed, index as i64, 2);
         for _ in 0..(MOST_PLANTS * CHUNK * CHUNK).round() as usize {
             let at = spot(&mut random, chunk.middle);
-            if !inside(at) || at.norm() < 1.0 {
+            if !inside(at) || at.norm() < 1.0 || terrain.wet(at.x, at.y, PLANTS_OFF_WATER) {
                 continue;
             }
             let thickness = thicket.at(at.x, at.y);
@@ -542,7 +557,7 @@ fn lay_out(seed: u64, trees: &[Tree]) -> Vec<Chunk> {
             }
             chunk.placements.push(Placement {
                 kind: plant,
-                position: Vector3::new(at.x, 0.0, at.y),
+                position: Vector3::new(at.x, terrain.height(at.x, at.y), at.y),
                 yaw: random.between(0.0, std::f32::consts::TAU),
                 scale,
                 shelter: 1.0 - 0.6 * thickness,
@@ -563,16 +578,18 @@ mod tests {
 
     #[test]
     fn same_seed_same_floor() {
-        let trees = forest::lay_out(2);
-        let a: Vec<Placement> = lay_out(2, &trees).into_iter().flat_map(|c| c.placements).collect();
-        let b: Vec<Placement> = lay_out(2, &trees).into_iter().flat_map(|c| c.placements).collect();
+        let terrain = Terrain::new(2);
+        let trees = forest::lay_out(2, &terrain);
+        let a: Vec<Placement> = lay_out(2, &terrain, &trees).into_iter().flat_map(|c| c.placements).collect();
+        let b: Vec<Placement> = lay_out(2, &terrain, &trees).into_iter().flat_map(|c| c.placements).collect();
         assert_eq!(a, b);
     }
 
     #[test]
     fn floor_keeps_off_trunks_and_grows_every_kind() {
-        let trees = forest::lay_out(1);
-        let placements: Vec<Placement> = lay_out(1, &trees).into_iter().flat_map(|c| c.placements).collect();
+        let terrain = Terrain::new(1);
+        let trees = forest::lay_out(1, &terrain);
+        let placements: Vec<Placement> = lay_out(1, &terrain, &trees).into_iter().flat_map(|c| c.placements).collect();
         let extent = extent();
         for p in &placements {
             assert!(p.position.x.abs() < extent && p.position.z.abs() < extent);
@@ -595,8 +612,9 @@ mod tests {
     #[test]
     #[ignore = "prints how many of each kind grow"]
     fn counts() {
-        let trees = forest::lay_out(1);
-        let placements: Vec<Placement> = lay_out(1, &trees).into_iter().flat_map(|c| c.placements).collect();
+        let terrain = Terrain::new(1);
+        let trees = forest::lay_out(1, &terrain);
+        let placements: Vec<Placement> = lay_out(1, &terrain, &trees).into_iter().flat_map(|c| c.placements).collect();
         for (index, kind) in kinds().enumerate() {
             println!("{}: {}", kind.name, placements.iter().filter(|p| p.kind == index).count());
         }

@@ -6,6 +6,7 @@
 use crate::{
     models::{Prepared, mesh_of},
     random::{Noise, Random, smoothstep},
+    terrain::Terrain,
     wind::{self, Profile, Sway},
 };
 use fyrox::{
@@ -140,6 +141,8 @@ const TRIES: usize = 60_000;
 pub const GLADE_SIZE: f32 = 45.0;
 /// The size range of the trees, as a scale of the model.
 const SCALE: (f32, f32) = (0.75, 1.2);
+/// How far a trunk keeps from the water's edge, in meters.
+const OFF_WATER: f32 = 0.8;
 /// How tall a trunk collider is, in meters, from the ground: above head height is enough.
 const TRUNK_HEIGHT: f32 = 4.0;
 
@@ -155,8 +158,9 @@ pub struct Tree {
     pub scale: f32,
 }
 
-/// Lays out a forest: where every tree stands. The same seed lays out the same forest.
-pub fn lay_out(seed: u64) -> Vec<Tree> {
+/// Lays out a forest on `terrain`: where every tree stands, out of the water. The same seed lays
+/// out the same forest.
+pub fn lay_out(seed: u64, terrain: &Terrain) -> Vec<Tree> {
     let mut random = Random(seed ^ 0x9e37_79b9_7f4a_7c15);
     let glades = Thicket::new(seed);
     // Trees are kept in a grid of cells as wide as the furthest two trees can be required to
@@ -188,6 +192,10 @@ pub fn lay_out(seed: u64) -> Vec<Tree> {
         let species = pick_species(&mut random, thickness);
         let scale = random.between(SCALE.0, SCALE.1);
         let reach = SPECIES[species].crown * scale;
+        let trunk = SPECIES[species].trunk * scale;
+        if terrain.wet(position.x, position.z, trunk + OFF_WATER) {
+            continue;
+        }
 
         let (cx, cz) = cell_of(position);
         let crowded = (cx.saturating_sub(1)..=(cx + 1).min(cells_across - 1)).any(|x| {
@@ -195,7 +203,7 @@ pub fn lay_out(seed: u64) -> Vec<Tree> {
                 cells[z * cells_across + x].iter().any(|&other| {
                     let other = &trees[other];
                     let apart = (reach + SPECIES[other.species].crown * other.scale) * SPACING;
-                    (other.position - position).norm_squared() < apart * apart
+                    (other.position.xz() - position.xz()).norm_squared() < apart * apart
                 })
             })
         });
@@ -203,9 +211,14 @@ pub fn lay_out(seed: u64) -> Vec<Tree> {
             continue;
         }
         cells[cz * cells_across + cx].push(trees.len());
+        // Stood as low as the ground round its trunk, so on a slope no root shows under it.
+        let ground = [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0), (0.0, 0.0)]
+            .iter()
+            .map(|(dx, dz)| terrain.height(position.x + dx * trunk, position.z + dz * trunk))
+            .fold(f32::MAX, f32::min);
         trees.push(Tree {
             species,
-            position,
+            position: Vector3::new(position.x, ground, position.z),
             yaw: random.between(0.0, std::f32::consts::TAU),
             scale,
         });
@@ -299,19 +312,19 @@ mod tests {
 
     #[test]
     fn same_seed_same_forest() {
-        assert_eq!(lay_out(3), lay_out(3));
+        assert_eq!(lay_out(3, &Terrain::new(3)), lay_out(3, &Terrain::new(3)));
     }
 
     #[test]
     fn trees_keep_apart_and_off_the_clearing() {
-        let trees = lay_out(1);
+        let trees = lay_out(1, &Terrain::new(1));
         assert!(trees.len() > 300, "only {} trees", trees.len());
         for (i, a) in trees.iter().enumerate() {
             assert!(a.position.xz().norm() >= CLEARING);
             assert!(a.position.x.abs() <= HALF_EXTENT && a.position.z.abs() <= HALF_EXTENT);
             for b in &trees[i + 1..] {
                 let apart = (SPECIES[a.species].crown * a.scale + SPECIES[b.species].crown * b.scale) * SPACING;
-                assert!((a.position - b.position).norm() >= apart);
+                assert!((a.position.xz() - b.position.xz()).norm() >= apart);
             }
         }
     }
@@ -319,7 +332,7 @@ mod tests {
     #[test]
     #[ignore = "prints glades: places with trees round them but none near, for sunlit views"]
     fn glades() {
-        let trees = lay_out(1);
+        let trees = lay_out(1, &Terrain::new(1));
         let mut found = 0;
         for z in (-120..=120).step_by(6) {
             for x in (-120..=120).step_by(6) {
@@ -338,7 +351,7 @@ mod tests {
     #[ignore = "prints how many trees each seed grows"]
     fn counts() {
         for seed in 1..6 {
-            let trees = lay_out(seed);
+            let trees = lay_out(seed, &Terrain::new(seed));
             let per_species: Vec<usize> =
                 (0..SPECIES.len()).map(|s| trees.iter().filter(|t| t.species == s).count()).collect();
             println!("seed {seed}: {} trees {per_species:?}", trees.len());
@@ -347,7 +360,7 @@ mod tests {
 
     #[test]
     fn every_species_grows() {
-        let trees = lay_out(1);
+        let trees = lay_out(1, &Terrain::new(1));
         for index in 0..SPECIES.len() {
             assert!(trees.iter().any(|t| t.species == index), "no {}", SPECIES[index].name);
         }

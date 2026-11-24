@@ -10,11 +10,13 @@ use crate::{
     forest::{self, SPECIES},
     models::{self, Prepared},
     player::Player,
+    terrain::Terrain,
+    water::Water,
     wind::{Sway, Wind},
 };
 use fyrox::{
     core::{
-        algebra::{Matrix4, UnitQuaternion, Vector2, Vector3},
+        algebra::{UnitQuaternion, Vector2, Vector3},
         color::Color,
         log::Log,
         pool::Handle,
@@ -43,10 +45,7 @@ use fyrox::{
             BaseLightBuilder,
             directional::{CsmOptions, DirectionalLight, DirectionalLightBuilder, FrustumSplitOptions},
         },
-        mesh::{
-            Mesh, MeshBuilder,
-            surface::{SurfaceBuilder, SurfaceData, SurfaceResource},
-        },
+        mesh::Mesh,
         rigidbody::{RigidBodyBuilder, RigidBodyType},
         skybox::SkyBoxKind,
         transform::TransformBuilder,
@@ -102,10 +101,17 @@ pub struct Wilderness {
     #[reflect(hidden)]
     models: Vec<ModelResource>,
     planted: bool,
-    /// The bare ground, until the loam takes its place.
+    /// The land, and its ground's squares, bare earth until the loam takes its place.
     #[visit(skip)]
     #[reflect(hidden)]
-    ground: Handle<Node>,
+    terrain: Option<Terrain>,
+    #[visit(skip)]
+    #[reflect(hidden)]
+    ground: Vec<Handle<Node>>,
+    /// The water in the river and the streams.
+    #[visit(skip)]
+    #[reflect(hidden)]
+    water: Water,
     #[visit(skip)]
     #[reflect(hidden)]
     floor: Option<Floor>,
@@ -193,16 +199,31 @@ impl Wilderness {
             scene.set_skybox(None);
         }
 
-        self.ground = build_ground(&mut scene.graph);
+        // The land, its ground bare earth until the loam has loaded, and its water.
+        let started = std::time::Instant::now();
+        let terrain = Terrain::new(seed());
+        let mut bare = Material::standard();
+        bare.set_property("diffuseColor", GROUND);
+        self.ground = terrain.build_ground(&mut scene.graph, &MaterialResource::new_embedded(bare));
+        build_walls(&mut scene.graph);
+        self.water = Water::build(&mut scene, &terrain);
+        Log::info(format!(
+            "Shaped the land: a river (by the start at x {:.1}) and {} streams, in {:.2} s",
+            terrain.river_x(0.0),
+            terrain.channels.len() - 1,
+            started.elapsed().as_secs_f32()
+        ));
         // WILDERNESS_SPAWN=<x>,<z> starts the player there, in meters, rather than in the
         // clearing in the middle: a glade in the sun, say, to see shadows.
-        let spawn = std::env::var("WILDERNESS_SPAWN")
+        let (x, z) = std::env::var("WILDERNESS_SPAWN")
             .ok()
             .and_then(|at| {
                 let (x, z) = at.split_once(',')?;
-                Some(Vector3::new(x.trim().parse().ok()?, 0.0, z.trim().parse().ok()?))
+                Some((x.trim().parse().ok()?, z.trim().parse().ok()?))
             })
-            .unwrap_or_else(Vector3::zeros);
+            .unwrap_or((0.0, 0.0));
+        let spawn = Vector3::new(x, terrain.height(x, z), z);
+        self.terrain = Some(terrain);
         self.player = Player::spawn(&mut scene.graph, spawn);
         self.flashlight = Flashlight::build(&mut scene.graph, self.player.camera());
         // WILDERNESS_VIEW=<yaw>,<pitch> starts the view turned so, in degrees (pitch down), for
@@ -297,10 +318,10 @@ impl Wilderness {
         if self.models.iter().any(|model| model.is_loading()) {
             return false;
         }
-        let seed = std::env::var("WILDERNESS_SEED")
-            .ok()
-            .and_then(|seed| seed.parse().ok())
-            .unwrap_or(SEED);
+        let seed = seed();
+        let Some(terrain) = &self.terrain else {
+            return false;
+        };
         for (path, model) in model_paths().zip(&self.models) {
             if !model.is_ok() {
                 Log::err(format!("Could not load {path}; it is left out"));
@@ -309,7 +330,7 @@ impl Wilderness {
         let started = std::time::Instant::now();
         let wind = wind_blows();
         let double_sided: Vec<Vec<bool>> = model_paths().map(models::double_sided).collect();
-        let mut trees = forest::lay_out(seed);
+        let mut trees = forest::lay_out(seed, terrain);
         trees.retain(|tree| self.models[tree.species].is_ok());
         let scene = &mut ctx.scenes[self.scene];
         let (_, sways) = forest::plant(
@@ -327,6 +348,7 @@ impl Wilderness {
         let floor_models = &self.models[SPECIES.len()..SPECIES.len() + floor::kinds().count()];
         let mut floor = Floor::lay_out(
             seed,
+            terrain,
             &trees,
             floor_models.to_vec(),
             double_sided[SPECIES.len()..SPECIES.len() + floor::kinds().count()].to_vec(),
@@ -342,8 +364,7 @@ impl Wilderness {
         let player = self.player.feet(&scene.graph);
         floor.update(scene, &mut self.prepared, player, &wind_now, 0.0, true);
         if let Some(loam) = self.models.last().filter(|m| m.is_ok()) {
-            lay_loam(scene, loam);
-            scene.graph.remove_node(self.ground);
+            lay_loam(scene, loam, &self.ground);
         }
         Log::info(format!(
             "Planted {} trees and {} plants and rocks from seed {seed} in {:.1} s; wind {}",
@@ -393,68 +414,47 @@ fn wind_blows() -> bool {
     std::env::var("WILDERNESS_WIND").as_deref() != Ok("0")
 }
 
-/// Lays the loam over the whole ground: its one-meter tile, stretched across, its textures
-/// repeated a meter apart.
-fn lay_loam(scene: &mut Scene, loam: &ModelResource) {
-    let width = 2.0 * (forest::HALF_EXTENT + BORDER);
+/// Lays the loam over the `ground`'s squares: the material of its one-meter tile, whose texture
+/// the squares repeat a meter apart.
+fn lay_loam(scene: &mut Scene, loam: &ModelResource, ground: &[Handle<Node>]) {
     let root = loam.instantiate(scene);
     let graph = &mut scene.graph;
-    graph[root]
-        .local_transform_mut()
-        .set_scale(Vector3::new(width, 1.0, width));
-    let nodes: Vec<Handle<Node>> = graph.traverse_handle_iter(root).collect();
-    for handle in nodes {
-        graph[handle].set_cast_shadows(false);
-        if let Some(mesh) = graph[handle].cast_mut::<Mesh>() {
+    let material = graph
+        .traverse_handle_iter(root)
+        .find_map(|handle| graph[handle].cast::<Mesh>()?.surfaces().first().map(|s| s.material().deep_copy()));
+    graph.remove_node(root);
+    let Some(material) = material else {
+        Log::warn(format!("{LOAM} has no surface; the ground stays bare"));
+        return;
+    };
+    material.data_ref().set_property("texCoordScale", Vector2::new(1.0, 1.0));
+    for &square in ground {
+        if let Some(mesh) = graph[square].cast_mut::<Mesh>() {
             for surface in mesh.surfaces_mut() {
-                let material = surface.material().deep_copy();
-                material
-                    .data_ref()
-                    .set_property("texCoordScale", Vector2::new(width, width));
-                surface.set_material(material);
+                surface.set_material(material.clone());
             }
         }
     }
 }
 
-/// The ground: a flat sheet of bare earth under the whole forest, solid, with invisible walls
-/// round its edge. Returns the sheet, which the loam replaces once loaded.
-fn build_ground(graph: &mut Graph) -> Handle<Node> {
-    let width = 2.0 * (forest::HALF_EXTENT + BORDER);
-    let mut material = Material::standard();
-    material.set_property("diffuseColor", GROUND);
-    let thickness = 0.2;
-    let sheet = MeshBuilder::new(
-        BaseBuilder::new()
-            .with_name("Ground")
-            .with_cast_shadows(false)
-            .with_local_transform(
-                TransformBuilder::new()
-                    .with_local_position(Vector3::new(0.0, -thickness / 2.0, 0.0))
-                    .with_local_scale(Vector3::new(width, thickness, width))
-                    .build(),
-            ),
-    )
-    .with_surfaces(vec![
-        SurfaceBuilder::new(SurfaceResource::new_embedded(SurfaceData::make_cube(
-            Matrix4::identity(),
-        )))
-        .with_material(MaterialResource::new_embedded(material))
-        .build(),
-    ])
-    .build(graph);
+/// Which forest grows: WILDERNESS_SEED, or [`SEED`].
+fn seed() -> u64 {
+    std::env::var("WILDERNESS_SEED")
+        .ok()
+        .and_then(|seed| seed.parse().ok())
+        .unwrap_or(SEED)
+}
 
-    let half = width / 2.0;
-    let wall_height = 10.0;
-    let mut body = BaseBuilder::new().with_name("Ground body");
+/// Invisible walls round the ground's edge, which keep the player in.
+fn build_walls(graph: &mut Graph) {
+    let half = crate::terrain::half_size();
+    let wall_height = 20.0;
+    let mut body = BaseBuilder::new().with_name("Walls");
     let pieces = [
-        // The ground itself.
-        (Vector3::new(0.0, -thickness / 2.0, 0.0), Vector3::new(half, thickness / 2.0, half)),
-        // The walls, north, south, east and west.
-        (Vector3::new(0.0, wall_height, half), Vector3::new(half, wall_height, 0.5)),
-        (Vector3::new(0.0, wall_height, -half), Vector3::new(half, wall_height, 0.5)),
-        (Vector3::new(half, wall_height, 0.0), Vector3::new(0.5, wall_height, half)),
-        (Vector3::new(-half, wall_height, 0.0), Vector3::new(0.5, wall_height, half)),
+        (Vector3::new(0.0, 0.0, half), Vector3::new(half, wall_height, 0.5)),
+        (Vector3::new(0.0, 0.0, -half), Vector3::new(half, wall_height, 0.5)),
+        (Vector3::new(half, 0.0, 0.0), Vector3::new(0.5, wall_height, half)),
+        (Vector3::new(-half, 0.0, 0.0), Vector3::new(0.5, wall_height, half)),
     ];
     for (position, extents) in pieces {
         let collider = ColliderBuilder::new(
@@ -468,7 +468,6 @@ fn build_ground(graph: &mut Graph) -> Handle<Node> {
     RigidBodyBuilder::new(body)
         .with_body_type(RigidBodyType::Static)
         .build(graph);
-    sheet.to_base()
 }
 
 /// With WILDERNESS_STATS=1 or WILDERNESS_BENCH=1, logs what the renderer did, once a second.
@@ -527,6 +526,7 @@ impl Plugin for Wilderness {
         }
         let scene = &mut ctx.scenes[self.scene];
         self.player.update(&mut scene.graph, ctx.dt);
+        self.water.update(scene, self.sun, ctx.dt);
         self.flashlight.update(&mut scene.graph, self.player.yaw_pitch(), ctx.dt);
         if let Some(lantern) = &mut self.lantern {
             lantern.update(scene, self.player.camera(), self.player.yaw_pitch(), ctx.dt);
