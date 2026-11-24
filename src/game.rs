@@ -5,6 +5,7 @@ use crate::{
     day::Day,
     floor::{self, Floor},
     flashlight::Flashlight,
+    lantern::Lantern,
     hud::WindGauge,
     forest::{self, SPECIES},
     models::{self, Prepared},
@@ -87,7 +88,7 @@ pub const BORDER: f32 = 12.0;
 /// at all, between, less and less.
 const TREES_SWAY: (f32, f32) = (60.0, 85.0);
 /// What the help line says once the forest has grown.
-const HELP: &str = "WASD walk  ·  Shift run  ·  Space jump  ·  F flashlight  ·  Click to look around  ·  Esc free the mouse";
+const HELP: &str = "WASD walk  ·  Shift run  ·  Space jump  ·  F flashlight  ·  L lantern  ·  Click to look around  ·  Esc free the mouse";
 
 #[derive(Default, Debug, PartialEq, Visit, Reflect)]
 #[reflect(non_cloneable, type_uuid = "6f1c2b7e-4a5d-4e8b-9c3a-1d2e7f80a915")]
@@ -138,9 +139,13 @@ pub struct Wilderness {
     #[visit(skip)]
     #[reflect(hidden)]
     sun: Handle<DirectionalLight>,
+    /// What the player can light the way with: one at a time.
     #[visit(skip)]
     #[reflect(hidden)]
     flashlight: Flashlight,
+    #[visit(skip)]
+    #[reflect(hidden)]
+    lantern: Option<Lantern>,
     /// What the status line says, the clock included.
     #[visit(skip)]
     #[reflect(hidden)]
@@ -213,6 +218,7 @@ impl Wilderness {
         self.models = model_paths()
             .map(|path| ctx.resource_manager.request::<Model>(path))
             .collect();
+        self.lantern = Some(Lantern::load(&ctx.resource_manager));
     }
 
     fn build_status(&mut self, ctx: &mut PluginContext) {
@@ -231,6 +237,23 @@ impl Wilderness {
         .with_text("The forest is growing...")
         .build(&mut ui.build_ctx());
         self.gauge = WindGauge::build(ui);
+    }
+
+    /// Switches the flashlight on or off (`flashlight`), or takes out or puts away the lantern:
+    /// the player holds one or the other, so taking out one puts the other away.
+    fn light_the_way(&mut self, graph: &mut Graph, flashlight: bool) {
+        let lantern_held = self.lantern.as_ref().is_some_and(Lantern::held);
+        let (flashlight_on, lantern_on) = if flashlight {
+            (!self.flashlight.on(graph), false)
+        } else {
+            (false, !lantern_held)
+        };
+        self.flashlight.set_on(graph, flashlight_on);
+        if let Some(lantern) = &mut self.lantern {
+            if lantern.held() != lantern_on {
+                lantern.set_held(graph, lantern_on);
+            }
+        }
     }
 
     /// Moves the sun on, and lights the scene for the time of day, under WILDERNESS_DAY.
@@ -505,6 +528,9 @@ impl Plugin for Wilderness {
         let scene = &mut ctx.scenes[self.scene];
         self.player.update(&mut scene.graph, ctx.dt);
         self.flashlight.update(&mut scene.graph, self.player.yaw_pitch(), ctx.dt);
+        if let Some(lantern) = &mut self.lantern {
+            lantern.update(scene, self.player.camera(), self.player.yaw_pitch(), ctx.dt);
+        }
         let started = std::time::Instant::now();
         if let Some(wind) = &mut self.wind {
             wind.update(ctx.dt);
@@ -575,8 +601,8 @@ impl Plugin for Wilderness {
                     let down = *state == ElementState::Pressed;
                     if *key == KeyCode::Escape && down {
                         self.set_mouse_captured(&mut ctx, false);
-                    } else if *key == KeyCode::KeyF && down {
-                        self.flashlight.toggle(&mut ctx.scenes[self.scene].graph);
+                    } else if matches!(key, KeyCode::KeyF | KeyCode::KeyL) && down {
+                        self.light_the_way(&mut ctx.scenes[self.scene].graph, *key == KeyCode::KeyF);
                     } else if let (Some(day), true, KeyCode::BracketLeft | KeyCode::BracketRight | KeyCode::KeyP) =
                         (&mut self.day, down, key)
                     {

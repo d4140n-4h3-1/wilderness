@@ -22,6 +22,7 @@ mod floor;
 mod forest;
 mod game;
 mod hud;
+mod lantern;
 mod models;
 mod player;
 mod random;

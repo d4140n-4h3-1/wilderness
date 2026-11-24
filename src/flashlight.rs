@@ -59,10 +59,13 @@ impl Flashlight {
         Self { light, aim: None }
     }
 
-    pub fn toggle(&self, graph: &mut Graph) {
+    pub fn on(&self, graph: &Graph) -> bool {
+        graph.try_get(self.light).is_ok_and(|light| light.visibility())
+    }
+
+    pub fn set_on(&self, graph: &mut Graph, on: bool) {
         if let Ok(light) = graph.try_get_mut(self.light) {
-            let on = light.visibility();
-            light.set_visibility(!on);
+            light.set_visibility(on);
         }
     }
 
