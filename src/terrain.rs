@@ -689,8 +689,8 @@ impl Terrain {
     }
 
     /// The way water from `spring` runs: downhill by the steepest way, a meter at a time, until
-    /// it reaches the river; caught in a hollow, straight on to the river. Smoothed, as the tool's
-    /// channels are, of the grid's zigzag.
+    /// it reaches the river; caught in a hollow, straight on to the river. Its turns rounded, as
+    /// the tool rounds a tributary's.
     fn trace_down(&self, spring: Vector2<f32>) -> Vec<Vector2<f32>> {
         // Into the river's water, which the stream's own is then cut back to (see `water.rs`).
         let reached = |p: Vector2<f32>| (p.x - self.river_x(p.y)).abs() < RIVER_HALF_WIDTH * 0.2;
@@ -738,17 +738,21 @@ impl Terrain {
             };
             path.push(at);
         }
-        // Smoothed over seven points, the ends kept.
-        let smooth: Vec<Vector2<f32>> = (0..path.len())
+        // Its turns rounded, as the tool's `smooth_channel_path` rounds a tributary's: each point
+        // the average of up to four either side, the nearer weighing more, the ends kept. (Its
+        // height is the banks', which never rise downstream.)
+        (0..path.len())
             .map(|i| {
-                if i == 0 || i + 1 == path.len() {
-                    return path[i];
+                let radius = 4.min(i).min(path.len() - 1 - i);
+                let (mut sum, mut weights) = (Vector2::zeros(), 0.0);
+                for offset in -(radius as i64)..=radius as i64 {
+                    let weight = (radius as i64 + 1 - offset.abs()) as f32;
+                    sum += path[(i as i64 + offset) as usize] * weight;
+                    weights += weight;
                 }
-                let window = &path[i.saturating_sub(3)..(i + 4).min(path.len())];
-                window.iter().sum::<Vector2<f32>>() / window.len() as f32
+                sum / weights
             })
-            .collect();
-        smooth
+            .collect()
     }
 
     /// Adds a channel along `points`: its banks at the land's height, never rising downstream; and
@@ -915,7 +919,7 @@ mod tests {
 
     #[test]
     fn every_stream_reaches_the_river_downhill() {
-        for seed in 1..6 {
+        for seed in (1..6).chain([crate::game::SEED]) {
             let terrain = Terrain::new(seed);
             assert_eq!(terrain.channels.len(), 1 + STREAMS);
             for stream in &terrain.channels[1..] {
@@ -946,7 +950,8 @@ mod tests {
         // No step: neighbours a centimeter apart never more than two centimeters apart in
         // height (the steepest underwater drop-off, where a shelf falls to a scoured run, is a
         // little over one in one), and none nearer the water, where the bed is shaped.
-        let terrain = Terrain::new(1);
+        for seed in [1, crate::game::SEED] {
+        let terrain = Terrain::new(seed);
         let mut random = Random(5);
         for k in 0..80_000 {
             let (x, z) = if k % 2 == 0 {
@@ -967,13 +972,14 @@ mod tests {
             // 19 centimeters: a bank up to four in one, but no step.)
             let in_basin = terrain.basins.iter().any(|basin| basin.polar(x, z).0 < BASIN_REACH + 0.05);
             let most = if in_basin { 0.05 } else { 0.02 };
-            assert!((a - b).abs() < most, "a step at {x}, {z}: {a} to {b}");
+            assert!((a - b).abs() < most, "seed {seed}: a step at {x}, {z}: {a} to {b}");
+        }
         }
     }
 
     #[test]
     fn a_spring_heads_every_stream_and_ponds_lie_in_the_woods() {
-        for seed in 1..6 {
+        for seed in (1..6).chain([crate::game::SEED]) {
             let terrain = Terrain::new(seed);
             let springs: Vec<&Basin> = terrain.basins.iter().filter(|b| b.is_spring()).collect();
             assert_eq!(springs.len(), STREAMS, "seed {seed}");
@@ -1008,7 +1014,7 @@ mod tests {
     #[test]
     fn no_step_in_or_round_a_basin() {
         // Every basin, and round it, densely: the rims, the outlets, a stream's head.
-        for seed in 1..6 {
+        for seed in (1..6).chain([crate::game::SEED]) {
             let terrain = Terrain::new(seed);
             for basin in &terrain.basins {
                 let r = basin.reach() + 1.0;

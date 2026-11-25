@@ -2,7 +2,7 @@
 //! on every machine.
 
 /// A small seeded random number generator (splitmix64).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct Random(pub u64);
 
 impl Random {

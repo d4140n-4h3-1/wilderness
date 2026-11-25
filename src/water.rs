@@ -196,7 +196,13 @@ struct Ribbon {
 
 impl Ribbon {
     fn new(surface: &Surface, material: MaterialResource, roll: f32) -> Self {
-        material.data_ref().set_property("obstacleCurrent", CONTACT_CURRENT);
+        {
+            let mut material = material.data_ref();
+            material.set_property("obstacleCurrent", CONTACT_CURRENT);
+            // The ripples along the banks' shallows, as plant_life's; how strong by how fast the
+            // water runs is the shader's, so none on still water.
+            material.set_property("bankRippleStrength", 1.0f32);
+        }
         let triangles: Vec<([Vector3<f32>; 3], [f32; 4])> = surface
             .triangles
             .iter()

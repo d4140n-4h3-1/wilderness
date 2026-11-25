@@ -1,4 +1,4 @@
-// The Birch Glade's flowing water (plant_life environments/birch-glade/hydroxus, bd30234), with
+// The Birch Glade's flowing water (plant_life environments/birch-glade/hydroxus, d1984be), with
 // its refraction and nearby reflections of the opaque scene (Hydroxus's forward scene-color copy),
 // and ripples round what stands in it. Changed for Wilderness, each marked: carried downstream by
 // gravity at each stretch's own speed; its own colour and foam lit as the renderer lights a
@@ -22,6 +22,7 @@
             name: "properties",
             kind: PropertyGroup([
                 (name: "flowPhase", kind: Float(value: 0.0)),
+                (name: "bankRippleStrength", kind: Float(value: 0.0)),
                 (name: "sunDirection", kind: Vector3(value: (-0.4234, 0.7460, -0.5141))),
                 (name: "foamStrength", kind: Float(value: 0.72)),
                 (name: "waveStrength", kind: Float(value: 1.0)),
@@ -260,7 +261,7 @@
                                 * (1.0 - smoothstep(0.14, 0.64, gap))
                                 * (1.0 - smoothstep(2.6, 4.8, step));
                             if (confidence <= 0.0) { break; }
-                            let color = textureSampleLevel(fyrox_sceneColor_tex, fyrox_sceneColor_samp, uv, 0.0).rgb;
+                            let color = textureSampleLevel(fyrox_sceneColor_tex, fyrox_sceneColor_samp, crossing, 0.0).rgb;
                             return vec4f(color, confidence);
                         }
                         previousUv = uv;
@@ -302,7 +303,17 @@
                     let fineWeight = 1.0 - smoothstep(0.65, 2.7, fwidth(wa.ripple));
                     let grainWeight = 1.0 - smoothstep(0.65, 2.7, fwidth(wa.grain));
                     let rough = 1.0 + 0.6 * smoothstep(0.03, 0.12, fall);
-                    let wave = (waveHeight(wa, broadWeight, fineWeight, grainWeight) * weightA
+                    // Shallow depth contours follow the visible banks, including curves in the bed.
+                    // Wilderness: as strong as the water runs fast here (see FULL_STRETCH).
+                    let bankBend = 0.67 * sin(uv.x * 0.89 + uv.y * 2.13)
+                                 + 0.31 * sin(uv.x * 2.27 - uv.y * 3.41 + phase);
+                    let bankPhase = 115.0 * bedDepth - 1.8 * uv.x + 2.0 * phase;
+                    let bankBand = smoothstep(0.008, 0.026, bedDepth)
+                                 * (1.0 - smoothstep(0.075, 0.17, bedDepth));
+                    let bankDetail = 1.0 - smoothstep(0.55, 2.5, fwidth(bankPhase));
+                    let bankRipple = 0.0018 * properties.bankRippleStrength * clamp(speed / FULL_STRETCH, 0.0, 1.0)
+                                   * bankBand * bankDetail * sin(bankPhase + 0.55 * bankBend);
+                    let wave = bankRipple + (waveHeight(wa, broadWeight, fineWeight, grainWeight) * weightA
                               + waveHeight(wb, broadWeight, fineWeight, grainWeight) * (1.0 - weightA)) * rough;
 
                     // Use a level tangent plane so the ribbon's triangle slopes cannot

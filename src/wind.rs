@@ -137,6 +137,11 @@ impl Wind {
         self.drift += self.direction * speed * dt;
     }
 
+    /// How strong the wind is now, about 0 (still) to 1.
+    pub fn strength(&self) -> f32 {
+        self.strength
+    }
+
     /// The push of the wind at `x`, `z`, along x and z: its length is about 0 in still air, up
     /// to about 1.5 in the strongest gust, and averages near a half, the wind the models' bake
     /// was made for.

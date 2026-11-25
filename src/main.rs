@@ -28,6 +28,7 @@ mod models;
 mod player;
 mod random;
 mod sky;
+mod sound;
 mod terrain;
 mod water;
 mod wind;

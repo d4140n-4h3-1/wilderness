@@ -194,8 +194,13 @@ impl Player {
         body.set_lin_vel(velocity);
     }
 
+    /// How fast the player is moving, in meters a second, along x, y and z.
+    pub fn velocity(&self, graph: &Graph) -> Vector3<f32> {
+        graph[self.body].lin_vel()
+    }
+
     /// Whether the player's feet are on something, or within a few centimeters of it.
-    fn grounded(&self, graph: &Graph) -> bool {
+    pub fn grounded(&self, graph: &Graph) -> bool {
         // A rising player is jumping, not standing, even at the moment it leaves the ground.
         if graph[self.body].lin_vel().y > 0.5 {
             return false;

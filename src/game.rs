@@ -55,8 +55,9 @@ use fyrox::{
 };
 use fyrox::{graph::SceneGraph, material::MaterialResourceExtension};
 
-/// Which forest grows, unless WILDERNESS_SEED says otherwise.
-const SEED: u64 = 1;
+/// Which forest grows, unless WILDERNESS_SEED says otherwise: a river valley with three ponds
+/// within a short walk of the start.
+pub const SEED: u64 = 15;
 /// Light from the sky on the side of things the sun is not on.
 const AMBIENT: Color = Color::opaque(128, 136, 146);
 /// The sun: warm, in the afternoon.
@@ -157,6 +158,10 @@ pub struct Wilderness {
     #[visit(skip)]
     #[reflect(hidden)]
     sky: Sky,
+    /// The footsteps, the running water and the wind in the trees.
+    #[visit(skip)]
+    #[reflect(hidden)]
+    sounds: crate::sound::Sounds,
     /// What the status line says, the clock included.
     #[visit(skip)]
     #[reflect(hidden)]
@@ -243,6 +248,9 @@ impl Wilderness {
             Some((yaw.trim().parse::<f32>().ok()?, pitch.trim().parse::<f32>().ok()?))
         }) {
             self.player.set_view(yaw.to_radians(), pitch.to_radians());
+        }
+        if let Some(terrain) = &self.terrain {
+            self.sounds = crate::sound::Sounds::build(&mut scene, &ctx.resource_manager, terrain, self.player.camera(), seed());
         }
         self.scene = ctx.scenes.add(scene);
 
@@ -558,6 +566,12 @@ impl Plugin for Wilderness {
             lamps: crate::water::lamps_near(&scene.graph, eye),
         };
         self.water.update(scene, &lights, eye, wading, ctx.dt);
+        if let Some(terrain) = &self.terrain {
+            let velocity = self.player.velocity(&scene.graph);
+            let grounded = self.player.grounded(&scene.graph);
+            let wind = self.wind.as_ref().map_or(0.0, |wind| wind.strength());
+            self.sounds.update(scene, terrain, feet, velocity, grounded, wind, ctx.dt);
+        }
         self.flashlight.update(&mut scene.graph, self.player.yaw_pitch(), ctx.dt);
         if let Some(lantern) = &mut self.lantern {
             lantern.update(scene, self.player.camera(), self.player.yaw_pitch(), ctx.dt);
