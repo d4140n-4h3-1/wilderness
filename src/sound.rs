@@ -61,11 +61,13 @@ const STRIDE: f32 = 0.47;
 const STRIDE_PER_SPEED: f32 = 0.1;
 /// Slower than this, in meters a second, the player is standing, not walking.
 const STILL: f32 = 0.4;
-/// How loud a footstep is, walking and running.
+/// How loud a footstep is, walking and running; and how much louder wading: its recordings are
+/// a few decibels quieter than the forest floor's, and the running water is all round it.
 const STEP_GAIN: (f32, f32) = (0.45, 0.7);
+const WADING_LOUDER: f32 = 2.2;
 /// How loud each of the running water's sources is at its loudest, and the wind in the trees in
 /// still air and in the strongest wind.
-const WATER_GAIN: f32 = 0.45;
+const WATER_GAIN: f32 = 0.3;
 const WIND_GAIN: (f32, f32) = (0.12, 0.65);
 /// How quickly the loops' loudness follows where the player is and the wind, per second.
 const FOLLOW: f32 = 2.0;
@@ -177,7 +179,7 @@ impl Sounds {
         SoundBuilder::new(BaseBuilder::new().with_name("Footstep"))
             .with_buffer(Some(buffer))
             .with_play_once(true)
-            .with_gain(gain * self.random.between(0.85, 1.0))
+            .with_gain(gain * if wading { WADING_LOUDER } else { 1.0 } * self.random.between(0.85, 1.0))
             .with_pitch(self.random.between(0.94, 1.06) as f64)
             .with_spatial_blend_factor(0.0)
             .with_status(Status::Playing)
