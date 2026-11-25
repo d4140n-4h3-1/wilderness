@@ -548,11 +548,16 @@ impl Plugin for Wilderness {
         let feet = self.player.feet(&scene.graph);
         let wading = (feet - Vector3::new(0.3, 0.0, 0.3), feet + Vector3::new(0.3, 1.8, 0.3));
         let eye = scene.graph[self.player.camera()].global_position();
-        let sky = self.day.as_ref().map(|day| {
-            let lit = day.lighting();
-            (lit.zenith, lit.haze)
-        });
-        self.water.update(scene, toward_sun, sky, eye, wading, ctx.dt);
+        let lit = self.day.as_ref().map(|day| day.lighting());
+        let lights = crate::water::Lights {
+            toward_sun,
+            sky: lit.as_ref().map(|lit| (lit.zenith, lit.haze)),
+            toward_moon: lit.as_ref().map_or(-toward_sun, |lit| lit.toward_moon),
+            night: lit.as_ref().map_or(0.0, |lit| lit.stars),
+            star_turn: lit.as_ref().map_or(0.0, |lit| lit.star_turn),
+            lamps: crate::water::lamps_near(&scene.graph, eye),
+        };
+        self.water.update(scene, &lights, eye, wading, ctx.dt);
         self.flashlight.update(&mut scene.graph, self.player.yaw_pitch(), ctx.dt);
         if let Some(lantern) = &mut self.lantern {
             lantern.update(scene, self.player.camera(), self.player.yaw_pitch(), ctx.dt);

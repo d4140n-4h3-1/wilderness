@@ -41,6 +41,19 @@
                 // the water to mirror where its trace finds nothing nearer.
                 (name: "skyZenith", kind: Vector3(value: (0.32, 0.42, 0.55))),
                 (name: "skyHorizon", kind: Vector3(value: (0.19, 0.23, 0.24))),
+                // Wilderness: everything that gives light, mirrored. The moon (toward it); how much
+                // it is night, 0 by day to 1, for the moon and the stars; how far round the stars
+                // have turned, in radians. And the scene's lamps, nearest first: each one's place
+                // and reach; its colour times its brightness, and the cosine where its beam is
+                // whole; which way it shines, and the cosine where its beam is gone (-1 for a light
+                // all round).
+                (name: "moonDirection", kind: Vector3(value: (0.0, -1.0, 0.0))),
+                (name: "night", kind: Float(value: 0.0)),
+                (name: "starTurn", kind: Float(value: 0.0)),
+                (name: "lampCount", kind: Int(value: 0)),
+                (name: "lampPlaces", kind: Vector4Array(value: [], max_len: 8)),
+                (name: "lampColors", kind: Vector4Array(value: [], max_len: 8)),
+                (name: "lampAims", kind: Vector4Array(value: [], max_len: 8)),
                 (name: "hazeColor", kind: Vector3(value: (0.45, 0.53, 0.6))),
                 (name: "hazeDensity", kind: Float(value: 0.0)),
                 (name: "hazeStart", kind: Float(value: 0.0)),
@@ -131,6 +144,62 @@
                 const FLOW_CYCLE: f32 = 1.6;
                 // Wilderness: how much of the sky a river in a forest sees, against open ground.
                 const SKY_SEEN: f32 = 0.35;
+                // Wilderness: the stars, as `sky.shader` draws them (the same functions), for the
+                // water to mirror.
+                // The celestial pole, 48 degrees up in the north (+z), as the sun's path assumes.
+                const SKY_POLE: vec3f = vec3f(0.0, 0.7431448, 0.6691306);
+
+                fn skyHash(v0: vec3u) -> vec3u {
+                    var v = v0 * 1664525u + 1013904223u;
+                    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+                    v ^= v >> vec3u(16u);
+                    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+                    return v;
+                }
+
+                fn skyRandom(cell: vec3f, seed: u32) -> vec3f {
+                    let c = vec3i(cell);
+                    let h = skyHash(vec3u(bitcast<u32>(c.x), bitcast<u32>(c.y), bitcast<u32>(c.z) ^ seed));
+                    return vec3f(h) / 4294967295.0;
+                }
+
+                // Turns `v` by `angle` about the unit axis `axis`.
+                fn skyTurn(v: vec3f, axis: vec3f, angle: f32) -> vec3f {
+                    let c = cos(angle);
+                    let s = sin(angle);
+                    return v * c + cross(axis, v) * s + axis * dot(axis, v) * (1.0 - c);
+                }
+
+                // One layer of stars: the sky cut into cells `scale` to a radian or so, a star in
+                // `density` of them, somewhere inside it (never at its edge, so never cut off),
+                // as bright as chance has it - most faint, a few bright - a pixel or two across.
+                fn skyStars(d: vec3f, scale: f32, density: f32, seed: u32) -> vec3f {
+                    let cell = floor(d * scale);
+                    let r = skyRandom(cell, seed);
+                    if (r.x > density) {
+                        return vec3f(0.0);
+                    }
+                    let spot = normalize(cell + 0.25 + 0.5 * skyRandom(cell, seed ^ 0x9e3779b9u));
+                    let away = length(d - spot) * scale;
+                    // Wilderness: a pixel's breadth fixed (about 1.5 milliradians, as the view's is),
+                    // not measured: the water's stars are worked out past an early return, where
+                    // screen-space derivatives are not allowed.
+                    let pixel = scale * 0.0015;
+                    let point = 1.0 - smoothstep(0.0, pixel * 1.6, away);
+                    let bright = pow(r.y, 10.0) * 2.5 + 0.012;
+                    // Some bluish, some yellowish, as stars are.
+                    let tint = mix(vec3f(0.75, 0.85, 1.0), vec3f(1.0, 0.85, 0.65), r.z);
+                    // Twinkling, a little.
+                    let twinkle = 0.8 + 0.2 * sin(properties.flowTime * (2.0 + 5.0 * r.z) + r.y * 40.0);
+                    return tint * bright * point * twinkle;
+                }
+
+                // A soft, uneven cloud of light: the Milky Way's.
+                fn skyHaze(p: vec3f) -> f32 {
+                    return 0.5 + 0.25 * sin(p.x * 5.1 + sin(p.y * 3.3)) * sin(p.y * 4.7 + p.z * 2.1)
+                               + 0.25 * sin(p.z * 9.3 - p.x * 6.2 + sin(p.y * 7.7));
+                }
+
                 // Wilderness: how fast water runs for what stands in it to draw its rings out
                 // fully downstream, in meters a second.
                 const FULL_STRETCH: f32 = 2.0;
@@ -333,7 +402,24 @@
                     // Analytic sky reflection and a broad, broken highlight from the main light.
                     let skyHeight = smoothstep(-0.08, 0.58, reflected.y);
                     // Wilderness: the sky as it is now (see `sky.shader`), not a fixed pale grey.
-                    let sky = mix(properties.skyHorizon, properties.skyZenith, skyHeight);
+                    var sky = mix(properties.skyHorizon, properties.skyZenith, skyHeight);
+                    // Wilderness: the moon's glow mirrored, as `sky.shader` draws it round the
+                    // moon: drawn out by the ripples into a path across the water.
+                    let moon = normalize(properties.moonDirection);
+                    let moonUp = smoothstep(-0.05, 0.03, moon.y) * properties.night;
+                    let moonColor = vec3f(0.75, 0.8, 0.9);
+                    let cosMoon = clamp(dot(reflected, moon), 0.0, 1.0);
+                    sky += moonColor * moonUp * (0.02 * pow(cosMoon, 40.0) + 0.12 * pow(cosMoon, 400.0)) / SKY_SEEN;
+                    // Wilderness: and the stars and the Milky Way, as `sky.shader` draws them,
+                    // turned about the pole; the ripples set them shimmering.
+                    if (properties.night > 0.001) {
+                        let c = skyTurn(reflected, SKY_POLE, -properties.starTurn);
+                        var night = skyStars(c, 160.0, 0.01, 0x1234u) + skyStars(c, 55.0, 0.012, 0x8765u) * 3.0;
+                        let band = exp(-pow(dot(c, normalize(vec3f(0.3, 0.45, -0.84))), 2.0) * 22.0);
+                        night += vec3f(0.55, 0.6, 0.75) * 0.012 * band * skyHaze(c * 3.0);
+                        let clear = smoothstep(-0.02, 0.2, reflected.y) * (1.0 - 0.8 * moonUp * pow(cosMoon, 24.0));
+                        sky += night * properties.night * clear;
+                    }
                     // FlowingWater ships a unit direction for the sun.
                     let sun = properties.sunDirection;
                     let daylight = smoothstep(-0.12, 0.22, sun.y);
@@ -352,7 +438,32 @@
                         let hit = traceReflection(worldPosition, reflected);
                         reflectedScene = mix(reflectedScene, hit.rgb, hit.a * reflectionBudget);
                     }
-                    let reflection = reflectedScene * fresnel + vec3f(1.0, 0.88, 0.67) * highlight * 0.15;
+                    // Wilderness: the moon's glint, as the sun's; and the light in the player's hand
+                    // shining back off the ripples (Blinn's, normalised, at the water's fresnel),
+                    // within its beam and its reach.
+                    let moonGlint = pow(cosMoon, 105.0) * moonUp;
+                    var lampGlint = vec3f(0.0);
+                    for (var i = 0; i < min(properties.lampCount, 8); i += 1) {
+                        let place = properties.lampPlaces[i];
+                        let color = properties.lampColors[i];
+                        let aim = properties.lampAims[i];
+                        let toLamp = place.xyz - worldPosition;
+                        let lampDistance = max(length(toLamp), 0.05);
+                        if (lampDistance >= place.w) { continue; }
+                        let towardLamp = toLamp / lampDistance;
+                        var aimed = 1.0;
+                        if (aim.w > -0.999) {
+                            aimed = smoothstep(aim.w, color.w, dot(-towardLamp, aim.xyz));
+                        }
+                        let reach = 1.0 - pow(lampDistance / place.w, 2.0);
+                        let halfway = normalize(towardLamp + viewDir);
+                        let facing = max(dot(normal, halfway), 0.0);
+                        let lampFresnel = 0.0204 + 0.9796 * pow(1.0 - clamp(dot(viewDir, halfway), 0.0, 1.0), 5.0);
+                        lampGlint += color.rgb * aimed * reach * reach * lampFresnel
+                            * (16.0 * pow(facing, 400.0) + 2.7 * pow(facing, 60.0));
+                    }
+                    let glints = vec3f(1.0, 0.88, 0.67) * highlight * 0.15 + moonColor * moonGlint * 0.15 + lampGlint;
+                    let reflection = reflectedScene * fresnel + glints;
 
                     let absorption = 1.0 - exp(-1.18 * pathLength);
                     // Wilderness: the water's own colour, and its foam's, lit as the renderer lights a
@@ -393,7 +504,9 @@
 
                     // Convert premultiplied terms to the forward pass's straight-alpha blend.
                     let bodyWeight = absorption * (1.0 - fresnel);
-                    var alpha = clamp((bodyWeight + fresnel + 0.23 * highlight) * contact, 0.0, 1.0);
+                    // Wilderness: every glint, not only the sun's.
+                    let glinting = max(glints.r, max(glints.g, glints.b));
+                    var alpha = clamp((bodyWeight + fresnel + 0.23 * glinting) * contact, 0.0, 1.0);
                     var premultiplied = (body * bodyWeight + reflection) * contact;
                     // Fade refraction before distant or deep water would hide the riverbed.
                     let refraction = clamp(properties.sceneColorWeight, 0.0, 1.0)

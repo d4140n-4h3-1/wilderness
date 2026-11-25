@@ -107,6 +107,79 @@ const ON_SEAM: f32 = 1.0e-3;
 /// shader's flow cycles (1.6 s), so starting over does not show.
 const FLOW_CLOCK: f32 = 1.6 * 500.0;
 
+/// How many of the scene's lights the water glints with: those nearest the eye.
+const MOST_LAMPS: usize = 8;
+
+/// A light the water glints with: where it is, in the shader's terms - its place and reach; its
+/// colour times its brightness, and where its beam is whole (the cosine of the angle from its
+/// middle); and which way it shines and where its beam is gone (for a light all round, any way
+/// and -1).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Lamp {
+    pub place: Vector4<f32>,
+    pub color: Vector4<f32>,
+    pub aim: Vector4<f32>,
+}
+
+/// Every point and spot light shown in `graph`, the [`MOST_LAMPS`] nearest `eye` (by how far
+/// their light has to go to reach it), for the water to glint with: the flashlight and the
+/// lantern, and whatever else gives light. (The sun and the moon are the sky's: see [`Lights`].)
+pub fn lamps_near(graph: &fyrox::scene::graph::Graph, eye: Vector3<f32>) -> Vec<Lamp> {
+    use fyrox::scene::light::{point::PointLight, spot::SpotLight};
+    let linear = |c: Color| {
+        let c = c.srgb_to_linear_f32();
+        Vector3::new(c.x, c.y, c.z)
+    };
+    let mut lamps: Vec<(f32, Lamp)> = graph
+        .linear_iter()
+        .filter(|node| node.global_visibility())
+        .filter_map(|node| {
+            let (light, reach, aim) = if let Some(spot) = node.cast::<SpotLight>() {
+                let light = spot.base_light_ref();
+                // A spot light shines down its own -y; its angles are whole ones.
+                let down = -light.up_vector().try_normalize(1e-6)?;
+                let whole = (spot.hotspot_cone_angle() * 0.5).cos();
+                let gone = ((spot.hotspot_cone_angle() + spot.falloff_angle_delta()) * 0.5).cos();
+                (light, spot.distance(), (down, gone, whole))
+            } else if let Some(point) = node.cast::<PointLight>() {
+                (point.base_light_ref(), point.radius(), (Vector3::y(), -1.0, -1.0))
+            } else {
+                return None;
+            };
+            let color = linear(light.color()) * light.intensity();
+            if color.max() <= 0.0 || reach <= 0.0 {
+                return None;
+            }
+            let position = light.global_position();
+            let (direction, gone, whole) = aim;
+            Some((
+                (position - eye).norm() - reach,
+                Lamp {
+                    place: Vector4::new(position.x, position.y, position.z, reach),
+                    color: Vector4::new(color.x, color.y, color.z, whole),
+                    aim: Vector4::new(direction.x, direction.y, direction.z, gone),
+                },
+            ))
+        })
+        .collect();
+    lamps.sort_by(|a, b| a.0.total_cmp(&b.0));
+    lamps.into_iter().take(MOST_LAMPS).map(|(_, lamp)| lamp).collect()
+}
+
+/// What lights the water now: the sun (unit vector toward it, even at night, as the shader dims
+/// its reflection and foam by how far down it is); the sky's colours overhead and at the horizon
+/// (sRGB), when days go by; the moon (toward it); how much it is night, 0 by day to 1, for the
+/// moon and the stars; how far round the stars have turned, in radians; and the lamps.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Lights {
+    pub toward_sun: Vector3<f32>,
+    pub sky: Option<(Color, Color)>,
+    pub toward_moon: Vector3<f32>,
+    pub night: f32,
+    pub star_turn: f32,
+    pub lamps: Vec<Lamp>,
+}
+
 /// One water surface in the scene.
 #[derive(Debug, PartialEq)]
 struct Ribbon {
@@ -273,15 +346,10 @@ impl Water {
         count
     }
 
-    /// Moves the water on by `dt` seconds, with the sun `toward_sun` (a unit vector, the sun's
-    /// even at night, as the shader dims its reflection and foam by how far down it is), hazed as
-    /// `scene`'s fog is now; seen from `eye`, and the one moving thing that may stand in it lying
-    /// within `wading` (least corner and most), rippling round it as round the rocks.
-    ///
-    /// `sky` is the sky's colours now, overhead and at the horizon (sRGB), when days go by, for
-    /// the water to mirror.
-    #[allow(clippy::too_many_arguments)]
-    pub fn update(&mut self, scene: &Scene, toward_sun: Vector3<f32>, sky: Option<(Color, Color)>, eye: Vector3<f32>, wading: (Vector3<f32>, Vector3<f32>), dt: f32) {
+    /// Moves the water on by `dt` seconds, lit as `lights` say, hazed as `scene`'s fog is now;
+    /// seen from `eye`, and the one moving thing that may stand in it lying within `wading` (least
+    /// corner and most), rippling round it as round the rocks.
+    pub fn update(&mut self, scene: &Scene, lights: &Lights, eye: Vector3<f32>, wading: (Vector3<f32>, Vector3<f32>), dt: f32) {
         self.elapsed = (self.elapsed + dt) % FLOW_CLOCK;
         self.rings = (self.rings + dt * CONTACT_RINGS).rem_euclid(1.0);
         let linear = |c: Color| {
@@ -307,8 +375,15 @@ impl Water {
             material.set_property("flowPhase", (self.elapsed * ribbon.roll).rem_euclid(1.0));
             material.set_property("flowTime", self.elapsed);
             material.set_property("confluencePhase", shared);
-            material.set_property("sunDirection", toward_sun);
-            if let Some((zenith, horizon)) = sky {
+            material.set_property("sunDirection", lights.toward_sun);
+            material.set_property("moonDirection", lights.toward_moon);
+            material.set_property("night", lights.night);
+            material.set_property("starTurn", lights.star_turn);
+            material.set_property("lampCount", lights.lamps.len() as i32);
+            material.set_property("lampPlaces", lights.lamps.iter().map(|l| l.place).collect::<Vec<_>>());
+            material.set_property("lampColors", lights.lamps.iter().map(|l| l.color).collect::<Vec<_>>());
+            material.set_property("lampAims", lights.lamps.iter().map(|l| l.aim).collect::<Vec<_>>());
+            if let Some((zenith, horizon)) = lights.sky {
                 material.set_property("skyZenith", linear(zenith));
                 material.set_property("skyHorizon", linear(horizon));
             }
