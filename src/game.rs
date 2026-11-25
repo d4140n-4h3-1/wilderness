@@ -546,7 +546,7 @@ impl Plugin for Wilderness {
             return Ok(());
         }
         let scene = &mut ctx.scenes[self.scene];
-        self.player.update(&mut scene.graph, ctx.dt);
+        self.player.update(&mut scene.graph, self.terrain.as_ref(), ctx.dt);
         // The sun's direction, even at night (the light is the moon's then).
         let toward_sun = match &self.day {
             Some(day) => day.lighting().toward_sun,

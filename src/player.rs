@@ -1,9 +1,11 @@
 //! The player: a capsule-shaped rigid body that walks, runs and jumps, with a camera at eye
 //! height that the mouse turns.
 
+use crate::terrain::Terrain;
 use fyrox::{
     core::{
         algebra::{Point3, UnitQuaternion, Vector3},
+        log::Log,
         pool::Handle,
     },
     keyboard::KeyCode,
@@ -38,6 +40,12 @@ const SENSITIVITY: f32 = 0.0025;
 const PITCH_LIMIT: f32 = 1.5;
 /// How far the camera sees, in meters: the haze has all but hidden everything by then.
 const VIEW: f32 = 400.0;
+/// How far below the ground the feet can be before the player has fallen through it, in meters:
+/// wading in the deepest water keeps them on the bed, above this.
+const THROUGH_THE_GROUND: f32 = 1.0;
+/// The furthest the player can be moved sideways in one update, in meters, before it counts as
+/// thrown rather than walked or run: a run covers about a tenth of this in a frame at 60 Hz.
+const THROWN: f32 = 1.5;
 
 /// What the player is holding down.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
@@ -59,6 +67,15 @@ pub struct Player {
     yaw: f32,
     pitch: f32,
     held: Held,
+    /// Where the body's middle was last update, and where it last stood on something: to put the
+    /// player back if the physics throws them or lets them fall through the ground.
+    last: Option<Vector3<f32>>,
+    safe: Option<Vector3<f32>>,
+    /// Where the body's middle started, and how many times running the player has been put back:
+    /// a place that throws them again and again is given up for the start.
+    start: Vector3<f32>,
+    put_back: u32,
+    calm: u32,
 }
 
 impl Player {
@@ -102,6 +119,7 @@ impl Player {
             body,
             collider,
             camera,
+            start: feet + Vector3::new(0.0, TO_FEET + 0.05, 0.0),
             ..Default::default()
         }
     }
@@ -160,8 +178,10 @@ impl Player {
         self.held = Held::default();
     }
 
-    /// Moves the player on by `dt` seconds, as the held keys say.
-    pub fn update(&mut self, graph: &mut Graph, dt: f32) {
+    /// Moves the player on by `dt` seconds, as the held keys say; first putting them back where
+    /// they last stood, should they have fallen through the `terrain` or been thrown.
+    pub fn update(&mut self, graph: &mut Graph, terrain: Option<&Terrain>, dt: f32) {
+        self.keep_in_the_world(graph, terrain);
         graph[self.camera].local_transform_mut().set_rotation(
             UnitQuaternion::from_axis_angle(&Vector3::y_axis(), self.yaw)
                 * UnitQuaternion::from_axis_angle(&Vector3::x_axis(), self.pitch),
@@ -194,6 +214,49 @@ impl Player {
         body.set_lin_vel(velocity);
     }
 
+    /// The fallback for what the physics gets wrong: a player under the ground, or moved further
+    /// in a frame than they can walk or run - pushed out of a rock's box, say - is put back where
+    /// they last stood, and stopped.
+    fn keep_in_the_world(&mut self, graph: &mut Graph, terrain: Option<&Terrain>) {
+        // The body hangs from the scene's root: its local position is its place in the world,
+        // and is right from the first frame, before the global one is worked out.
+        let middle = **graph[self.body].local_transform().position();
+        let feet = middle - Vector3::new(0.0, TO_FEET, 0.0);
+        let lost = !middle.iter().all(|v| v.is_finite());
+        let through = !lost && terrain.is_some_and(|t| feet.y < t.height(feet.x, feet.z) - THROUGH_THE_GROUND);
+        let thrown = !lost && self.last.is_some_and(|last| (middle - last).xz().norm() > THROWN);
+        if !(lost || through || thrown) {
+            // A second without being put back, and those before are behind them.
+            self.calm += 1;
+            if self.calm > 60 {
+                self.put_back = 0;
+            }
+            self.last = Some(middle);
+            if self.grounded(graph) {
+                self.safe = Some(middle);
+            }
+            return;
+        }
+        // Where they last stood; or the start, if they have never stood anywhere, or that place
+        // has thrown them three times running.
+        self.put_back += 1;
+        self.calm = 0;
+        if self.put_back > 3 {
+            self.safe = None;
+            self.put_back = 0;
+        }
+        let back = self.safe.unwrap_or(self.start);
+        Log::warn(format!(
+            "Player {} at {feet:?}: put back at {:?}",
+            if lost { "was lost" } else if through { "fell through the ground" } else { "was thrown" },
+            back - Vector3::new(0.0, TO_FEET, 0.0)
+        ));
+        let body = &mut graph[self.body];
+        body.local_transform_mut().set_position(back);
+        body.set_lin_vel(Vector3::zeros());
+        self.last = Some(back);
+    }
+
     /// How fast the player is moving, in meters a second, along x, y and z.
     pub fn velocity(&self, graph: &Graph) -> Vector3<f32> {
         graph[self.body].lin_vel()
@@ -218,5 +281,48 @@ impl Player {
             &mut hits,
         );
         hits.iter().any(|hit| hit.collider != self.collider)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A player under the ground, or thrown across it in a frame, is put back where they last
+    /// stood (here, never having stood, at the start), and stopped.
+    #[test]
+    fn a_player_under_the_ground_or_thrown_is_put_back() {
+        let terrain = Terrain::new(crate::game::SEED);
+        let mut graph = Graph::new();
+        let start = Vector3::new(0.0, terrain.height(0.0, 0.0), 0.0);
+        let mut player = Player::spawn(&mut graph, start);
+        let body = player.body;
+        let middle = |graph: &Graph| **graph[body].local_transform().position();
+        let put = |graph: &mut Graph, at: Vector3<f32>| {
+            graph[body].local_transform_mut().set_position(at);
+            graph[body].set_lin_vel(Vector3::new(0.0, -50.0, 0.0));
+        };
+
+        player.update(&mut graph, Some(&terrain), 1.0 / 60.0);
+        assert!((middle(&graph) - (start + Vector3::new(0.0, TO_FEET, 0.0))).norm() < 0.1);
+
+        // Fallen far below.
+        put(&mut graph, Vector3::new(1.0, -5000.0, 1.0));
+        player.update(&mut graph, Some(&terrain), 1.0 / 60.0);
+        let back = middle(&graph) - Vector3::new(0.0, TO_FEET, 0.0);
+        assert!((back - start).norm() < 0.2, "put back at {back:?}, not {start:?}");
+        assert!(graph[body].lin_vel().y > -1.0, "and stopped");
+
+        // Thrown 50 m in one frame.
+        put(&mut graph, start + Vector3::new(50.0, 2.0, 0.0));
+        player.update(&mut graph, Some(&terrain), 1.0 / 60.0);
+        let back = middle(&graph) - Vector3::new(0.0, TO_FEET, 0.0);
+        assert!((back - start).xz().norm() < 0.2, "put back at {back:?}");
+
+        // A step's walk is left alone.
+        let here = middle(&graph);
+        put(&mut graph, here + Vector3::new(0.1, 0.0, 0.0));
+        player.update(&mut graph, Some(&terrain), 1.0 / 60.0);
+        assert!((middle(&graph) - here - Vector3::new(0.1, 0.0, 0.0)).norm() < 1e-4);
     }
 }
