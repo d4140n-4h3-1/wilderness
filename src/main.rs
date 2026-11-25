@@ -11,7 +11,8 @@
 //! WILDERNESS_VIEW=<yaw>,<pitch> starts the view turned so, in degrees; WILDERNESS_YOCTITE_VIEW=1
 //! shows Yoctite's clusters (=cpu chooses them on the CPU); the forest is drawn with Yoctite and
 //! lit with Candelite unless WILDERNESS_CANDELITE=0 (Yoctite alone) or WILDERNESS_YOCTITE=0 (neither:
-//! the renderer draws it); WILDERNESS_CANDELITE_VIEW=1 shows what Candelite's rays see, =lit with the
+//! the renderer draws it) - or a graphics card that cannot run them, which turns them off by itself
+//! and says why in the log; WILDERNESS_CANDELITE_VIEW=1 shows what Candelite's rays see, =lit with the
 //! light on it;
 //! WILDERNESS_WIND=0 stills the wind; WILDERNESS_FLOOR=0 leaves the forest floor
 //! bare.
@@ -120,7 +121,9 @@ fn graphics_effects() -> fyrox_gfx::GraphicsEffects {
         // By default the forest is drawn with Yoctite - every tree's clusters at the level of
         // detail they need, chosen and drawn by the GPU, in place of the renderer - and lit with
         // Candelite's global illumination: skylight and sunlight bounced between surfaces, in place
-        // of the flat ambient colour (where rays cannot be traced, the ambient colour stays).
+        // of the flat ambient colour. Each only where the graphics card can run it (fyrox-gfx's
+        // `support`, checked at start): without Yoctite the renderer draws the forest, and without
+        // Candelite - or if it fails along the way - the ambient colour lights it.
         // WILDERNESS_CANDELITE=0 leaves Candelite out; WILDERNESS_YOCTITE=0 leaves both out, the
         // renderer drawing the forest itself.
         _ if std::env::var("WILDERNESS_YOCTITE").as_deref() == Ok("0") => {}

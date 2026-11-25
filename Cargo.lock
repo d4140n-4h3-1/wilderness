@@ -1616,11 +1616,12 @@ dependencies = [
 [[package]]
 name = "fyrox-gfx"
 version = "0.1.0"
-source = "git+https://github.com/d4140n-4h3-1/fyrox-gfx.git?branch=main#529955eb20163bbe9cb244dc77480dbfdda01289"
+source = "git+https://github.com/d4140n-4h3-1/fyrox-gfx.git?branch=main#33689f3af9baa23f4259560b248b7df5adb267b1"
 dependencies = [
  "fyrox",
  "fyrox-graphics-wgpu",
  "half",
+ "wgpu",
  "yoctite",
 ]
 
