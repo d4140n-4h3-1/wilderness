@@ -10,6 +10,7 @@ use crate::{
     forest::{self, SPECIES},
     models::{self, Prepared},
     player::Player,
+    sky::Sky,
     terrain::Terrain,
     water::Water,
     wind::{Sway, Wind},
@@ -152,6 +153,10 @@ pub struct Wilderness {
     #[visit(skip)]
     #[reflect(hidden)]
     lantern: Option<Lantern>,
+    /// The sky, while days go by.
+    #[visit(skip)]
+    #[reflect(hidden)]
+    sky: Sky,
     /// What the status line says, the clock included.
     #[visit(skip)]
     #[reflect(hidden)]
@@ -195,7 +200,7 @@ impl Wilderness {
 
         self.day = Day::from_env();
         if self.day.is_some() {
-            // The built-in sky is a picture of day; a plain colour, changing, stands for the sky.
+            // The built-in sky is a picture of day: the sky is drawn instead (see `sky.rs`).
             scene.set_skybox(None);
         }
 
@@ -207,6 +212,8 @@ impl Wilderness {
         self.ground = terrain.build_ground(&mut scene.graph, &MaterialResource::new_embedded(bare));
         build_walls(&mut scene.graph);
         self.water = Water::build(&mut scene, &terrain);
+        let stones = crate::bed::lay_gravel(&mut scene, &self.water.surfaces, &terrain, seed());
+        Log::info(format!("Gravel: {stones} stones embedded in the channels' beds"));
         Log::info(format!(
             "Shaped the land: a river (by the start at x {:.1}) and {} streams, in {:.2} s",
             terrain.river_x(0.0),
@@ -226,6 +233,9 @@ impl Wilderness {
         self.terrain = Some(terrain);
         self.player = Player::spawn(&mut scene.graph, spawn);
         self.flashlight = Flashlight::build(&mut scene.graph, self.player.camera());
+        if self.day.is_some() {
+            self.sky = Sky::build(&mut scene, self.player.camera());
+        }
         // WILDERNESS_VIEW=<yaw>,<pitch> starts the view turned so, in degrees (pitch down), for
         // screenshots taken the same way each time.
         if let Some((yaw, pitch)) = std::env::var("WILDERNESS_VIEW").ok().and_then(|view| {
@@ -287,6 +297,7 @@ impl Wilderness {
         let scene = &mut ctx.scenes[self.scene];
         scene.rendering_options.ambient_lighting_color = lit.ambient;
         scene.rendering_options.clear_color = Some(lit.sky);
+        self.sky.update(&lit, ctx.dt);
         if let Some(fog) = &mut scene.rendering_options.fog {
             fog.color = lit.haze;
         }
@@ -360,6 +371,8 @@ impl Wilderness {
             floor.retain(|_| false);
         }
         floor.build_rocks(&mut scene.graph);
+        let standing = self.water.set_standing(&floor.rock_bounds());
+        Log::info(format!("Water: ripples round {standing} rocks standing in it"));
         let wind_now = Wind::new(seed);
         let player = self.player.feet(&scene.graph);
         floor.update(scene, &mut self.prepared, player, &wind_now, 0.0, true);
@@ -526,7 +539,16 @@ impl Plugin for Wilderness {
         }
         let scene = &mut ctx.scenes[self.scene];
         self.player.update(&mut scene.graph, ctx.dt);
-        self.water.update(scene, self.sun, ctx.dt);
+        // The sun's direction, even at night (the light is the moon's then).
+        let toward_sun = match &self.day {
+            Some(day) => day.lighting().toward_sun,
+            None => scene.graph[self.sun].up_vector().try_normalize(f32::EPSILON).unwrap_or_else(Vector3::y),
+        };
+        // Ripples round the player wading, as round the rocks: the capsule's bounds.
+        let feet = self.player.feet(&scene.graph);
+        let wading = (feet - Vector3::new(0.3, 0.0, 0.3), feet + Vector3::new(0.3, 1.8, 0.3));
+        let eye = scene.graph[self.player.camera()].global_position();
+        self.water.update(scene, toward_sun, eye, wading, ctx.dt);
         self.flashlight.update(&mut scene.graph, self.player.yaw_pitch(), ctx.dt);
         if let Some(lantern) = &mut self.lantern {
             lantern.update(scene, self.player.camera(), self.player.yaw_pitch(), ctx.dt);

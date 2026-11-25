@@ -16,6 +16,7 @@
 //! WILDERNESS_WIND=0 stills the wind; WILDERNESS_FLOOR=0 leaves the forest floor
 //! bare.
 
+mod bed;
 mod day;
 mod flashlight;
 mod floor;
@@ -26,6 +27,7 @@ mod lantern;
 mod models;
 mod player;
 mod random;
+mod sky;
 mod terrain;
 mod water;
 mod wind;

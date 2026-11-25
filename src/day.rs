@@ -43,6 +43,14 @@ const HAZE: [(f32, Color); 5] = [
     (15.0, Color::opaque(178, 192, 204)),
     (90.0, Color::opaque(178, 192, 204)),
 ];
+/// The sky overhead, by the sun's elevation.
+const ZENITH: [(f32, Color); 5] = [
+    (-14.0, Color::opaque(2, 3, 9)),
+    (-6.0, Color::opaque(14, 22, 52)),
+    (2.0, Color::opaque(52, 78, 140)),
+    (15.0, Color::opaque(62, 112, 196)),
+    (90.0, Color::opaque(52, 104, 196)),
+];
 const SKY: [(f32, Color); 5] = [
     (-14.0, Color::opaque(6, 9, 20)),
     (-6.0, Color::opaque(40, 55, 95)),
@@ -73,7 +81,21 @@ pub struct Lighting {
     pub strength: f32,
     pub ambient: Color,
     pub haze: Color,
+    /// The sky near the horizon toward the sun: blue by day, pink and orange as it sets.
     pub sky: Color,
+    /// The sky overhead.
+    pub zenith: Color,
+    /// The sun's own colour, whatever lights the land.
+    pub sun_color: Color,
+    /// Unit vectors toward the sun and the moon (full, opposite it).
+    pub toward_sun: Vector3<f32>,
+    pub toward_moon: Vector3<f32>,
+    /// How much the sky glows toward the sun at the horizon, sunrise and sunset: 0 to 1.
+    pub twilight: f32,
+    /// How bright the stars are, 0 by day to 1 in the dark of night.
+    pub stars: f32,
+    /// How far round the stars have turned about the celestial pole, in radians.
+    pub star_turn: f32,
 }
 
 impl Day {
@@ -137,6 +159,15 @@ impl Day {
             ambient: by_elevation(&AMBIENT, elevation),
             haze: by_elevation(&HAZE, elevation),
             sky: by_elevation(&SKY, elevation),
+            zenith: by_elevation(&ZENITH, elevation),
+            sun_color: lerp(SUN_LOW, SUN_HIGH, smoothstep(0.0, 20.0, elevation)),
+            toward_sun,
+            toward_moon: -toward_sun,
+            // Strongest with the sun at the horizon, gone once it is high or well down.
+            twilight: smoothstep(-10.0, -2.0, elevation) * (1.0 - smoothstep(4.0, 14.0, elevation)),
+            stars: smoothstep(-4.0, -14.0, elevation),
+            // A whole turn a day, and a little more (the stars come round four minutes early).
+            star_turn: (self.hour / 24.0 * 1.0027) * std::f32::consts::TAU,
         }
     }
 }

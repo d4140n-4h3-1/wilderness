@@ -16,10 +16,19 @@
 //! Where a stream meets the river, the two are joined as plant_life's water join tool
 //! (`assets/terrain/hydroxus-terrain/hydroxus_water_join.py`) joins them - see [`join`], a port of
 //! its `join_water_channels` - and both are told of the junction it finds, where the shader blends
-//! their ripples into one. The water is dimmed with the light of the time of day, and hazed as
-//! the renderer's fog would, since it is drawn after the fog.
+//! their ripples into one. The water is hazed as the renderer's fog would, since it is drawn after
+//! the fog.
+//!
+//! The water mirrors what stands near it on screen, and ripples in rings round what stands in it -
+//! rocks, and the player wading - as plant_life's `set_reflection_strength` and
+//! `update_obstacles` have it (each surface told of at most eight contacts, those nearest the eye),
+//! the rings drawn out downstream as far as the water runs fast there, round where it is still.
+//!
+//! The ponds and springs are each a level surface over their basin, as the tool's Pond or Spring
+//! lays it (see [`basin`]), their ripples slower and lower and their foam less, as plant_life's
+//! sample sets them; each spring's stream is joined to it as the stream is to the river.
 
-use crate::terrain::{Channel, Terrain, side_of};
+use crate::terrain::{BASIN_WATER, Basin, Channel, Terrain, side_of};
 use fyrox::core::math::TriangleDefinition;
 use fyrox::{
     asset::untyped::ResourceKind,
@@ -30,7 +39,6 @@ use fyrox::{
         pool::Handle,
         uuid::Uuid,
     },
-    graph::SceneGraph,
     material::{
         Material, MaterialResource,
         shader::{Shader, ShaderResource},
@@ -38,7 +46,6 @@ use fyrox::{
     scene::{
         Scene,
         base::BaseBuilder,
-        light::directional::DirectionalLight,
         mesh::{
             MeshBuilder, RenderPath,
             buffer::{TriangleBuffer, VertexBuffer},
@@ -60,6 +67,29 @@ const CONFLUENCE_ROLL: f32 = 0.28;
 /// How far round a junction the two waters' ripples blend into one, in meters: as plant_life's
 /// sample.
 const CONFLUENCE_RADIUS: f32 = 2.2;
+/// And round where a stream leaves its spring: as the Birch Glade's.
+const SPRING_CONFLUENCE_RADIUS: f32 = 3.0;
+/// The ponds' and springs' ripples: how fast they roll, how high, and how much foam, as
+/// plant_life's sample sets them (`FlowingWater::attach` and `set_surface_activity`). Still
+/// water does not run: no speed to carry the ripples along.
+const POND_ROLL: f32 = 0.035;
+const POND_ACTIVITY: (f32, f32) = (0.30, 0.0);
+const SPRING_ROLL: f32 = 0.10;
+const SPRING_ACTIVITY: (f32, f32) = (0.52, 0.16);
+/// How strongly each kind of water mirrors the scenery near it: as plant_life's sample.
+const RIVER_REFLECTION: f32 = 0.55;
+const STREAM_REFLECTION: f32 = 0.35;
+const SPRING_REFLECTION: f32 = 0.60;
+const POND_REFLECTION: f32 = 0.78;
+/// How many contacts a surface's shader takes, and how many times a second their rings go out.
+const MOST_CONTACTS: usize = 8;
+/// Which way along the water's flow coordinates its current runs, for the rings round what stands
+/// in it: downstream. (How far they are drawn out is the shader's, by how fast the water runs
+/// there: not at all on a pond or a spring, whose water does not run.)
+const CONTACT_CURRENT: f32 = 1.0;
+const CONTACT_RINGS: f32 = 1.15;
+/// How many sides a basin's surface has round: as the tool's.
+const BASIN_SEGMENTS: usize = 72;
 /// The join tool's `blend_distance`: over how far from the river's edge a stream's water eases
 /// to the river's height, in meters.
 const JOIN_BLEND: f32 = 0.65;
@@ -71,14 +101,82 @@ const ON_SEAM: f32 = 1.0e-3;
 /// How long the flow's clock runs before starting over, in seconds: a whole number of the
 /// shader's flow cycles (1.6 s), so starting over does not show.
 const FLOW_CLOCK: f32 = 1.6 * 500.0;
-/// The light in the shade in full daylight (`game.rs`'s AMBIENT), against which the water is dimmed.
-const DAY_AMBIENT: Color = Color::opaque(128, 136, 146);
 
-/// The water: each channel's ribbon, its material, and how fast its ripples roll.
+/// One water surface in the scene.
+#[derive(Debug, PartialEq)]
+struct Ribbon {
+    material: MaterialResource,
+    /// How fast its ripples roll.
+    roll: f32,
+    /// Its triangles, and the least and most x and z of each, to find what stands in it.
+    triangles: Vec<([Vector3<f32>; 3], [f32; 4])>,
+    bounds: [f32; 4],
+    /// What stands in it and stays: each one's middle, and its contact for the shader (its middle
+    /// across, and its half widths).
+    standing: Vec<(Vector3<f32>, Vector4<f32>)>,
+}
+
+impl Ribbon {
+    fn new(surface: &Surface, material: MaterialResource, roll: f32) -> Self {
+        material.data_ref().set_property("obstacleCurrent", CONTACT_CURRENT);
+        let triangles: Vec<([Vector3<f32>; 3], [f32; 4])> = surface
+            .triangles
+            .iter()
+            .map(|t| {
+                let corners = t.map(|i| surface.vertices[i as usize].position);
+                (corners, bounds(corners.iter().map(|p| Vector2::new(p.x, p.z))))
+            })
+            .collect();
+        let bounds = bounds(triangles.iter().flat_map(|(c, _)| c.iter().map(|p| Vector2::new(p.x, p.z))));
+        Self { material, roll, triangles, bounds, standing: Vec::new() }
+    }
+
+    /// The contact of what lies within `low` to `high` (least corner and most), if it stands in
+    /// this water: plant_life's `update_obstacles`, which looks down five lines through it (its
+    /// middle, and most of the way to each side) for the surface.
+    fn contact(&self, low: Vector3<f32>, high: Vector3<f32>) -> Option<(Vector3<f32>, Vector4<f32>)> {
+        let half = (high - low) * 0.5;
+        let center = low + half;
+        if !center.iter().chain(half.iter()).all(|v| v.is_finite()) || half.x <= 0.0 || half.z <= 0.0 || half.y <= 0.012 {
+            return None;
+        }
+        let [west, south, east, north] = self.bounds;
+        if high.x < west || low.x > east || high.z < south || low.z > north {
+            return None;
+        }
+        let wet = [(0.0, 0.0), (-0.72, 0.0), (0.72, 0.0), (0.0, -0.72), (0.0, 0.72)].into_iter().any(|(x, z)| {
+            let at = Vector2::new(center.x + x * half.x, center.z + z * half.z);
+            self.triangles.iter().any(|(corners, [w, s, e, n])| {
+                if at.x < *w || at.x > *e || at.y < *s || at.y > *n {
+                    return false;
+                }
+                let [a, b, c] = corners.map(|p| Vector2::new(p.x, p.z));
+                let area = signed_area(a, b, c);
+                if area.abs() <= EPSILON {
+                    return false;
+                }
+                let (u, v) = (signed_area(b, c, at) / area, signed_area(c, a, at) / area);
+                let w = 1.0 - u - v;
+                if u < 0.0 || v < 0.0 || w < 0.0 {
+                    return false;
+                }
+                let y = corners[0].y * u + corners[1].y * v + corners[2].y * w;
+                y > low.y + 0.012 && y < high.y - 0.012
+            })
+        });
+        wet.then(|| (center, Vector4::new(center.x, center.z, half.x.max(0.035), half.z.max(0.035))))
+    }
+}
+
+/// The water: each surface.
 #[derive(Debug, Default, PartialEq)]
 pub struct Water {
-    ribbons: Vec<(Handle<Node>, MaterialResource, f32)>,
+    ribbons: Vec<Ribbon>,
     elapsed: f32,
+    rings: f32,
+    /// Each channel's water surface, as laid and joined, triangle by triangle: its corners,
+    /// and their flow coordinates (meters downstream, and across) - for the bed's gravel.
+    pub surfaces: Vec<Vec<([Vector3<f32>; 3], [Vector2<f32>; 3])>>,
 }
 
 impl Water {
@@ -93,65 +191,114 @@ impl Water {
         };
         let river = ribbon(&terrain.channels[0]);
         let mut ribbons = Vec::new();
+        let mut surfaces = Vec::new();
         let mut junctions = Vec::new();
-        let river_material = water_material(&shader);
-        for channel in &terrain.channels[1..] {
-            let Some((stream, center)) = join(&ribbon(channel), &river) else {
+        let river_material = water_material(&shader, RIVER_REFLECTION);
+        let pools: Vec<(&Basin, Surface)> = terrain.basins.iter().map(|b| (b, basin(b))).collect();
+        let mut pool_joins: Vec<Option<Vector4<f32>>> = vec![None; pools.len()];
+        for (c, channel) in terrain.channels.iter().enumerate().skip(1) {
+            // As the Birch Glade joins Fern Stream: to its spring first, then to the river.
+            let mut stream = ribbon(channel);
+            let mut confluences = Vec::new();
+            if let Some(p) = pools.iter().position(|(b, _)| b.outlet.is_some_and(|(_, fed)| fed == c)) {
+                match join(&stream, &pools[p].1) {
+                    Some((joined, center)) => {
+                        stream = joined;
+                        let junction = Vector4::new(center.x, center.y, center.z, SPRING_CONFLUENCE_RADIUS);
+                        pool_joins[p] = Some(junction);
+                        confluences.push(junction);
+                    }
+                    None => Log::warn(format!("{} does not run out of {}", channel.name, pools[p].0.name)),
+                }
+            }
+            let Some((stream, center)) = join(&stream, &river) else {
                 Log::warn(format!("{} does not reach the river's water; it is left out", channel.name));
                 continue;
             };
             let junction = Vector4::new(center.x, center.y, center.z, CONFLUENCE_RADIUS);
-            let material = water_material(&shader);
-            material.data_ref().set_property("confluences", vec![junction]);
+            confluences.insert(0, junction);
+            let material = water_material(&shader, STREAM_REFLECTION);
+            material.data_ref().set_property("confluences", confluences);
             junctions.push(junction);
-            let node = stream.build(scene, channel.name, &material);
-            ribbons.push((node, material, STREAM_ROLL));
+            stream.build(scene, channel.name, &material);
+            ribbons.push(Ribbon::new(&stream, material, STREAM_ROLL));
+            surfaces.push(stream.corners());
+        }
+        for ((pool, surface), joined) in pools.iter().zip(&pool_joins) {
+            let (roll, (waves, foam), mirror) = if pool.is_spring() {
+                (SPRING_ROLL, SPRING_ACTIVITY, SPRING_REFLECTION)
+            } else {
+                (POND_ROLL, POND_ACTIVITY, POND_REFLECTION)
+            };
+            let material = water_material(&shader, mirror);
+            {
+                let mut material = material.data_ref();
+                material.set_property("waveStrength", waves);
+                material.set_property("foamStrength", foam);
+                material.set_property("confluences", joined.iter().copied().collect::<Vec<_>>());
+            }
+            surface.build(scene, pool.name, &material);
+            ribbons.push(Ribbon::new(surface, material, roll));
+            surfaces.push(surface.corners());
         }
         Log::info(format!(
-            "Water: {} streams join the river, at {}",
+            "Water: {} streams join the river, at {}; {} run out of their springs, at {}; ponds at {}",
             junctions.len(),
-            junctions.iter().map(|j| format!("({:.0}, {:.0})", j.x, j.z)).collect::<Vec<_>>().join(", ")
+            junctions.iter().map(|j| format!("({:.0}, {:.0})", j.x, j.z)).collect::<Vec<_>>().join(", "),
+            pool_joins.iter().flatten().count(),
+            pools.iter().filter(|(b, _)| b.is_spring()).map(|(b, _)| format!("({:.0}, {:.0})", b.center.x, b.center.y)).collect::<Vec<_>>().join(", "),
+            pools.iter().filter(|(b, _)| !b.is_spring()).map(|(b, _)| format!("({:.0}, {:.0})", b.center.x, b.center.y)).collect::<Vec<_>>().join(", "),
         ));
         // The river is told of every junction (the shader takes eight).
         river_material.data_ref().set_property("confluences", junctions.iter().take(8).copied().collect::<Vec<_>>());
-        let node = river.build(scene, terrain.channels[0].name, &river_material);
-        ribbons.push((node, river_material, RIVER_ROLL));
-        Self { ribbons, elapsed: 0.0 }
+        river.build(scene, terrain.channels[0].name, &river_material);
+        ribbons.push(Ribbon::new(&river, river_material, RIVER_ROLL));
+        surfaces.insert(0, river.corners());
+        Self { ribbons, elapsed: 0.0, rings: 0.0, surfaces }
     }
 
-    /// Moves the water on by `dt` seconds, and lights and hazes it as `scene` is now, lit by
-    /// `sun`.
-    pub fn update(&mut self, scene: &Scene, sun: Handle<DirectionalLight>, dt: f32) {
+    /// Notes which of the things lying within `bounds` (each one's least corner and most) stand
+    /// in the water and stay there - rocks - for it to ripple round. Returns how many.
+    pub fn set_standing(&mut self, bounds: &[(Vector3<f32>, Vector3<f32>)]) -> usize {
+        let mut count = 0;
+        for ribbon in &mut self.ribbons {
+            ribbon.standing = bounds.iter().filter_map(|&(low, high)| ribbon.contact(low, high)).collect();
+            count += ribbon.standing.len();
+        }
+        count
+    }
+
+    /// Moves the water on by `dt` seconds, with the sun `toward_sun` (a unit vector, the sun's
+    /// even at night, as the shader dims its reflection and foam by how far down it is), hazed as
+    /// `scene`'s fog is now; seen from `eye`, and the one moving thing that may stand in it lying
+    /// within `wading` (least corner and most), rippling round it as round the rocks.
+    pub fn update(&mut self, scene: &Scene, toward_sun: Vector3<f32>, eye: Vector3<f32>, wading: (Vector3<f32>, Vector3<f32>), dt: f32) {
         self.elapsed = (self.elapsed + dt) % FLOW_CLOCK;
-        let options = &scene.rendering_options;
+        self.rings = (self.rings + dt * CONTACT_RINGS).rem_euclid(1.0);
         let linear = |c: Color| {
             let c = c.srgb_to_linear_f32();
             Vector3::new(c.x, c.y, c.z)
         };
-        // The light: the shade's, against full daylight's, and the sun's (or moon's) as high as
-        // it is; and which way the light comes from, for the highlight on the ripples.
-        let ambient = linear(options.ambient_lighting_color);
-        let day = linear(DAY_AMBIENT);
-        let mut light = ambient.component_div(&day) * 0.45;
-        let mut toward_sun = None;
-        if let Ok(sun) = scene.graph.try_get(sun) {
-            let base = sun.base_light_ref();
-            let up = sun.up_vector().try_normalize(f32::EPSILON);
-            light += linear(base.color())
-                * (base.intensity() * 0.55 * crate::random::smoothstep(-0.05, 0.3, up.map_or(0.0, |v| v.y)));
-            toward_sun = up;
-        }
-        let fog = options.fog.as_ref();
+        let fog = scene.rendering_options.fog.as_ref();
         let shared = (self.elapsed * CONFLUENCE_ROLL).rem_euclid(1.0);
-        for (_, material, roll) in &self.ribbons {
-            let mut material = material.data_ref();
-            material.set_property("flowPhase", (self.elapsed * roll).rem_euclid(1.0));
+        for ribbon in &self.ribbons {
+            // The contacts nearest the eye.
+            let mut contacts: Vec<(f32, Vector4<f32>)> = ribbon
+                .standing
+                .iter()
+                .chain(ribbon.contact(wading.0, wading.1).as_ref())
+                .map(|(center, contact)| ((center - eye).norm_squared(), *contact))
+                .collect();
+            contacts.sort_by(|a, b| a.0.total_cmp(&b.0));
+            contacts.truncate(MOST_CONTACTS);
+            let mut material = ribbon.material.data_ref();
+            material.set_property("obstaclePhase", self.rings);
+            material.set_property("obstacleCount", contacts.len() as i32);
+            material.set_property("obstacles", contacts.into_iter().map(|(_, c)| c).collect::<Vec<_>>());
+            material.set_property("flowPhase", (self.elapsed * ribbon.roll).rem_euclid(1.0));
             material.set_property("flowTime", self.elapsed);
             material.set_property("confluencePhase", shared);
-            material.set_property("light", light);
-            if let Some(toward_sun) = toward_sun {
-                material.set_property("sunDirection", toward_sun);
-            }
+            material.set_property("sunDirection", toward_sun);
             if let Some(fog) = fog {
                 material.set_property("hazeColor", linear(fog.color));
                 material.set_property("hazeDensity", fog.density);
@@ -163,11 +310,14 @@ impl Water {
     }
 }
 
-/// A material for water: the shader, and the frame before the water was drawn to see the bed
-/// through (fyrox-gfx's refraction pass copies it, and draws the water after).
-fn water_material(shader: &ShaderResource) -> MaterialResource {
+/// A material for water, refracting, and mirroring the scenery near it by `mirror`: as
+/// plant_life's `set_refraction_strength(1.0)` and `set_reflection_strength`, which have the
+/// renderer copy the lit opaque scene before the forward pass for the water to bend the view of
+/// its bed through, and to trace its reflections in.
+fn water_material(shader: &ShaderResource, mirror: f32) -> MaterialResource {
     let mut material = Material::from_shader(shader.clone());
-    material.bind("sceneColor", fyrox_gfx::refraction::scene_color());
+    material.set_property("sceneColorWeight", 1.0f32);
+    material.set_property("reflectionWeight", mirror);
     MaterialResource::new_ok(Uuid::new_v4(), ResourceKind::Embedded, material)
 }
 
@@ -215,6 +365,14 @@ impl Surface {
             .into_iter()
             .filter(|(_, count)| *count == 1)
             .map(|((a, b), _)| (self.vertices[a as usize], self.vertices[b as usize]))
+            .collect()
+    }
+
+    /// Its triangles' corners and their flow coordinates.
+    fn corners(&self) -> Vec<([Vector3<f32>; 3], [Vector2<f32>; 3])> {
+        self.triangles
+            .iter()
+            .map(|t| (t.map(|i| self.vertices[i as usize].position), t.map(|i| self.vertices[i as usize].uv)))
             .collect()
     }
 
@@ -272,6 +430,24 @@ fn ribbon(channel: &Channel) -> Surface {
             [[a, b, c], [b, d, c]]
         })
         .collect();
+    Surface { vertices, triangles }
+}
+
+/// A basin's water, as the tool's `create_basin` lays it: level, a fan from its middle out to
+/// [`BASIN_WATER`] of its shoreline, under its banks; its flow coordinates in meters across it
+/// from its corner. Still, so its ripples are not carried along.
+fn basin(basin: &Basin) -> Surface {
+    let vertex = |at: Vector2<f32>| Vert {
+        position: Vector3::new(at.x, basin.level, at.y),
+        uv: at - basin.center + basin.radii,
+        flow: Vector2::zeros(),
+    };
+    let mut vertices = vec![vertex(basin.center)];
+    for i in 0..BASIN_SEGMENTS {
+        vertices.push(vertex(basin.at(std::f32::consts::TAU * i as f32 / BASIN_SEGMENTS as f32, BASIN_WATER)));
+    }
+    let n = BASIN_SEGMENTS as u32;
+    let triangles = (0..n).map(|i| [0, i + 1, (i + 1) % n + 1]).collect();
     Surface { vertices, triangles }
 }
 
@@ -335,7 +511,9 @@ fn bounds(points: impl IntoIterator<Item = Vector2<f32>>) -> [f32; 4] {
 
 /// plant_life's `join_water_channels`, ported: removes the part of the `tributary` surface the
 /// `receiving` one covers, and eases the tributary's height into the receiver's within
-/// [`JOIN_BLEND`] of the receiver's edges, keeping its flow coordinates. Returns the trimmed
+/// [`JOIN_BLEND`] of the receiver's edges, keeping its flow coordinates. The easing is done to the
+/// tributary's own vertices before it is cut, so an edge split by the cut keeps the same height
+/// either side; only the points along the receiver's edge are then set to its height. Returns the trimmed
 /// tributary and the middle of the seam where they meet (the junction); [`None`] if the receiver
 /// covers the whole tributary, or the tributary does not reach the receiver's edge.
 fn join(tributary: &Surface, receiving: &Surface) -> Option<(Surface, Vector3<f32>)> {
@@ -350,7 +528,7 @@ fn join(tributary: &Surface, receiving: &Surface) -> Option<(Surface, Vector3<f3
     let banks = receiving.boundary();
 
     let mut seam = Vec::new();
-    let mut conform = |vertex: Vert| {
+    let mut conform = |vertex: Vert, seam_only: bool| {
         let point = vertex.xz();
         let mut nearest: Option<Vector3<f32>> = None;
         let mut distance = JOIN_BLEND;
@@ -368,21 +546,27 @@ fn join(tributary: &Surface, receiving: &Surface) -> Option<(Surface, Vector3<f3
             }
         }
         let mut result = vertex;
-        if let Some(nearest) = nearest {
+        let Some(nearest) = nearest else {
+            return result;
+        };
+        if seam_only {
+            if distance <= ON_SEAM {
+                result.position.y = nearest.y;
+                seam.push(result.position);
+            }
+        } else {
             let weight = 1.0 - distance / JOIN_BLEND;
             result.position.y += (nearest.y - result.position.y) * weight * weight * (3.0 - 2.0 * weight);
         }
-        if distance <= ON_SEAM {
-            seam.push(result.position);
-        }
         result
     };
+    let conformed: Vec<Vert> = tributary.vertices.iter().map(|&v| conform(v, false)).collect();
 
     let mut vertices = Vec::new();
     let mut faces = Vec::new();
     let mut indices: HashMap<[i64; 4], u32> = HashMap::new();
     for triangle in &tributary.triangles {
-        let polygon: Vec<Vert> = triangle.iter().map(|&i| tributary.vertices[i as usize]).collect();
+        let polygon: Vec<Vert> = triangle.iter().map(|&i| conformed[i as usize]).collect();
         let [left, bottom, right, top] = bounds(polygon.iter().map(Vert::xz));
         let mut pieces = vec![polygon];
         for ([west, south, east, north], receiver) in &receiver_triangles {
@@ -405,7 +589,7 @@ fn join(tributary: &Surface, receiving: &Surface) -> Option<(Surface, Vector3<f3
                 for (corner, vertex) in [first, a, b].into_iter().enumerate() {
                     let key = [vertex.position.x, vertex.position.z, vertex.uv.x, vertex.uv.y].map(|v| (v * 1.0e6).round() as i64);
                     face[corner] = *indices.entry(key).or_insert_with(|| {
-                        vertices.push(conform(vertex));
+                        vertices.push(conform(vertex, true));
                         vertices.len() as u32 - 1
                     });
                 }
@@ -488,5 +672,27 @@ mod tests {
         let river = &terrain.channels[0];
         let middle = river.speed(river.points.len() / 2);
         assert!((0.6..2.0).contains(&middle), "the river runs at {middle} m/s");
+    }
+
+    #[test]
+    fn ripples_round_what_stands_in_the_water_only() {
+        let terrain = Terrain::new(1);
+        let river = ribbon(&terrain.channels[0]);
+        let shader = ShaderResource::new_ok(Uuid::new_v4(), ResourceKind::Embedded, Shader::from_string(SHADER).expect("the shader parses"));
+        let water = Ribbon::new(&river, water_material(&shader, RIVER_REFLECTION), RIVER_ROLL);
+        let i = 150;
+        let (p, y) = (terrain.channels[0].points[i], terrain.channels[0].water(i));
+        let rock = |at: Vector2<f32>, bottom: f32, top: f32| {
+            (Vector3::new(at.x - 0.3, bottom, at.y - 0.3), Vector3::new(at.x + 0.3, top, at.y + 0.3))
+        };
+        // Through the surface, in the middle of the river: its contact there.
+        let (low, high) = rock(p, y - 0.4, y + 0.3);
+        let (_, contact) = water.contact(low, high).expect("a rock standing in the river");
+        assert!((contact.x - p.x).abs() < 1e-4 && (contact.z - 0.3).abs() < 1e-4);
+        // Under the surface, or above it, or on dry land: none.
+        assert!(water.contact(rock(p, y - 0.6, y - 0.1).0, rock(p, y - 0.6, y - 0.1).1).is_none());
+        assert!(water.contact(rock(p, y + 0.1, y + 0.6).0, rock(p, y + 0.1, y + 0.6).1).is_none());
+        let dry = p + side_of(&terrain.channels[0].points, i) * 8.0;
+        assert!(water.contact(rock(dry, y - 0.4, y + 0.3).0, rock(dry, y - 0.4, y + 0.3).1).is_none());
     }
 }

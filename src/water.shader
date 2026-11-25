@@ -1,41 +1,47 @@
-// The Birch Glade's flowing water (plant_life environments/birch-glade/hydroxus, 3450f70), dimmed
-// with the time of day and hazed as the scene's fog is (marked Wilderness where changed).
+// The Birch Glade's flowing water (plant_life environments/birch-glade/hydroxus, bd30234), with
+// its refraction and nearby reflections of the opaque scene (Hydroxus's forward scene-color copy),
+// and ripples round what stands in it. Changed for Wilderness, each marked: carried downstream by
+// gravity at each stretch's own speed; its own colour and foam lit as the renderer lights a
+// surface; less of the sky mirrored under the trees; the bed under it wet, and wobbling under
+// shallow water too; white water on steep stretches; hazed as the scene's fog is.
 (
     name: "WildernessWater",
 
     resources: [
+        (
+            name: "fyrox_sceneColor",
+            kind: Texture(kind: Sampler2D, fallback: Black),
+            binding: 1
+        ),
         (
             name: "fyrox_sceneDepth",
             kind: Texture(kind: DepthSampler2D, fallback: White),
             binding: 0
         ),
         (
-            // Wilderness: the frame as it was before the water was drawn (fyrox-gfx's copy, for
-            // its refraction pass), which the water bends the view of its bed through.
-            name: "sceneColor",
-            kind: Texture(kind: Sampler2D, fallback: Black),
-            binding: 1
-        ),
-        (
             name: "properties",
             kind: PropertyGroup([
-                // Wilderness: how much light falls on the water, against full daylight (the game
-                // dims it with the time of day); and the haze, as the renderer's fog pass lays it,
-                // which the water, drawn after that pass, must lay over itself.
-                (name: "light", kind: Vector3(value: (1.0, 1.0, 1.0))),
+                (name: "flowPhase", kind: Float(value: 0.0)),
+                (name: "sunDirection", kind: Vector3(value: (-0.4234, 0.7460, -0.5141))),
+                (name: "foamStrength", kind: Float(value: 0.72)),
+                (name: "waveStrength", kind: Float(value: 1.0)),
+                (name: "sceneColorWeight", kind: Float(value: 0.0)),
+                (name: "reflectionWeight", kind: Float(value: 0.0)),
+                (name: "confluencePhase", kind: Float(value: 0.0)),
+                (name: "confluences", kind: Vector4Array(value: [], max_len: 8)),
+                (name: "obstaclePhase", kind: Float(value: 0.0)),
+                (name: "obstacleCount", kind: Int(value: 0)),
+                (name: "obstacles", kind: Vector4Array(value: [], max_len: 8)),
+                (name: "obstacleCurrent", kind: Float(value: 0.0)),
+                // Wilderness: seconds gone by, which carries the water downstream at each
+                // stretch's own speed (see the vertex normal); and the haze, as the renderer's fog
+                // pass lays it, which the water, drawn after that pass, must lay over itself.
+                (name: "flowTime", kind: Float(value: 0.0)),
                 (name: "hazeColor", kind: Vector3(value: (0.45, 0.53, 0.6))),
                 (name: "hazeDensity", kind: Float(value: 0.0)),
                 (name: "hazeStart", kind: Float(value: 0.0)),
                 (name: "hazeBase", kind: Float(value: 0.0)),
                 (name: "hazeFalloff", kind: Float(value: 0.0)),
-                (name: "flowPhase", kind: Float(value: 0.0)),
-                // Wilderness: seconds gone by, which carries the water downstream at each
-                // stretch's own speed (see the vertex normal).
-                (name: "flowTime", kind: Float(value: 0.0)),
-                (name: "sunDirection", kind: Vector3(value: (-0.42, 0.74, -0.51))),
-                (name: "foamStrength", kind: Float(value: 0.72)),
-                (name: "confluencePhase", kind: Float(value: 0.0)),
-                (name: "confluences", kind: Vector4Array(value: [], max_len: 8)),
             ]),
             binding: 2
         ),
@@ -55,12 +61,11 @@
         ),
     ],
 
-    // Wilderness: drawn in fyrox-gfx's refraction pass, after the frame is copied, not forward.
-    disabled_passes: ["GBuffer", "Forward", "DirectionalShadow", "PointShadow", "SpotShadow"],
+    disabled_passes: ["GBuffer", "DirectionalShadow", "PointShadow", "SpotShadow"],
 
     passes: [
         (
-            name: "Refraction",
+            name: "Forward",
             draw_parameters: DrawParameters(
                 cull_face: None,
                 color_write: ColorMask(
@@ -72,8 +77,18 @@
                 depth_write: false,
                 stencil_test: None,
                 depth_test: Some(Less),
-                // Wilderness: laid over the copied frame by the shader itself.
-                blend: None,
+                blend: Some(BlendParameters(
+                    func: BlendFunc(
+                        sfactor: SrcAlpha,
+                        dfactor: OneMinusSrcAlpha,
+                        alpha_sfactor: SrcAlpha,
+                        alpha_dfactor: OneMinusSrcAlpha,
+                    ),
+                    equation: BlendEquation(
+                        rgb: Add,
+                        alpha: Add
+                    )
+                )),
                 stencil_op: StencilOp(
                     fail: Keep,
                     zfail: Keep,
@@ -105,25 +120,20 @@
 
            fragment_shader:
                r#"
-                fn linearDepth(z: f32) -> f32 {
-                    return (fyrox_cameraData.zFar * fyrox_cameraData.zNear)
-                         / (fyrox_cameraData.zFar - z * fyrox_cameraData.zRange);
-                }
-
                 // Wilderness: water carried by gravity. Each stretch runs at its own speed, so a
                 // pattern carried along would stretch and tear between fast and slow water as
                 // time went on: instead two copies of it are carried, each for a short cycle and
                 // then sent back, half a cycle apart, and crossfaded so that neither's jump shows.
                 const FLOW_CYCLE: f32 = 1.6;
-                // How far the view through the water is bent, for each meter of water under it at
-                // a meter's distance; and the most water that counts.
-                const REFRACTION: f32 = 0.12;
-                const REFRACTION_DEPTH: f32 = 0.6;
-                // How much of the sky a river in a forest sees, against open ground.
+                // Wilderness: how much of the sky a river in a forest sees, against open ground.
                 const SKY_SEEN: f32 = 0.35;
+                // Wilderness: how fast water runs for what stands in it to draw its rings out
+                // fully downstream, in meters a second.
+                const FULL_STRETCH: f32 = 2.0;
+                // Wilderness: how much of the light a wet bed sends back, against a dry one's.
+                const WET_BED: vec3f = vec3f(0.58, 0.66, 0.62);
 
                 struct Waves {
-                    wave: f32,
                     roll: f32,
                     ripple: f32,
                     grain: f32,
@@ -133,7 +143,8 @@
                 fn channelWaves(uv: vec2f, shift: f32, phase: f32) -> Waves {
                     let u = uv.x - shift;
                     let v = uv.y;
-                    let bend = sin(u * 0.89 + v * 2.13) * 0.57;
+                    let bend = 0.67 * sin(u * 0.89 + v * 2.13)
+                                    + 0.31 * sin(u * 2.27 - v * 3.41 + phase);
                     var w: Waves;
                     w.roll = u * 3.05 + v * 2.2 + bend - phase;
                     w.ripple = u * 8.4 - v * 3.9 + bend - 3.0 * phase;
@@ -141,10 +152,49 @@
                     return w;
                 }
 
-                fn fn_wave(w: Waves, broadWeight: f32, fineWeight: f32, grainWeight: f32) -> f32 {
-                    return sin(w.roll) * (0.020 * broadWeight)
-                         + sin(w.ripple) * (0.009 * fineWeight)
-                         + sin(w.grain) * (0.003 * grainWeight);
+                fn waveHeight(w: Waves, broadWeight: f32, fineWeight: f32, grainWeight: f32) -> f32 {
+                    return sin(w.roll) * (0.014 * broadWeight)
+                         + sin(w.ripple) * (0.006 * fineWeight)
+                         + sin(w.grain) * (0.0018 * grainWeight);
+                }
+
+                fn linearDepth(z: f32) -> f32 {
+                    return (fyrox_cameraData.zFar * fyrox_cameraData.zNear)
+                         / (fyrox_cameraData.zFar - z * fyrox_cameraData.zRange);
+                }
+
+                // Three bounded steps against the opaque depth snapshot, with sky fallback.
+                fn traceReflection(origin: vec3f, direction: vec3f) -> vec4f {
+                    let viewProjection = fyrox_cameraData.viewProjectionMatrix;
+                    let start = viewProjection * vec4f(origin + vec3f(0.0, 0.045, 0.0), 1.0);
+                    let ray = viewProjection * vec4f(direction, 0.0);
+                    let bounds = vec2f(textureDimensions(fyrox_sceneDepth_tex, 0));
+                    var previousUv = vec2f(0.0);
+                    var previousGap = -1.0;
+                    var haveFront = false;
+                    for (var i = 0; i < 3; i += 1) {
+                        let step = array<f32, 3>(0.65, 1.9, 4.4)[i];
+                        let point = start + ray * step;
+                        if (point.w <= 0.001) { break; }
+                        let uv = point.xy / point.w * vec2f(0.5, -0.5) + 0.5;
+                        if (any(uv < vec2f(0.008)) || any(uv > vec2f(0.992))) { break; }
+                        let depth = textureLoad(fyrox_sceneDepth_tex, vec2i(uv * bounds), 0);
+                        let gap = point.w - linearDepth(depth);
+                        if (haveFront && gap >= 0.0) {
+                            let crossing = mix(previousUv, uv, -previousGap / max(gap-previousGap, 0.001));
+                            let border = min(min(crossing.x, crossing.y), min(1.0-crossing.x, 1.0-crossing.y));
+                            let confidence = smoothstep(0.01, 0.13, border)
+                                * (1.0 - smoothstep(0.14, 0.64, gap))
+                                * (1.0 - smoothstep(2.6, 4.8, step));
+                            if (confidence <= 0.0) { break; }
+                            let color = textureSampleLevel(fyrox_sceneColor_tex, fyrox_sceneColor_samp, uv, 0.0).rgb;
+                            return vec4f(color, confidence);
+                        }
+                        previousUv = uv;
+                        previousGap = gap;
+                        haveFront = gap < 0.0;
+                    }
+                    return vec4f(0.0);
                 }
 
                 @fragment fn fs_main(
@@ -157,15 +207,16 @@
                     let sceneDepth = textureLoad(fyrox_sceneDepth_tex, vec2i(fragCoord.xy), 0);
                     let fragmentDepth = linearDepth(fragCoord.z);
                     let eye = fyrox_cameraData.position - worldPosition;
-                    let viewDir = normalize(eye);
+                    let eyeDistance = max(length(eye), 0.001);
+                    let viewDir = eye / eyeDistance;
                     let pathLength = clamp((linearDepth(sceneDepth) - fragmentDepth)
-                                           * length(eye) / max(fragmentDepth, 0.001), 0.0, 10.0);
+                                           * eyeDistance / max(fragmentDepth, 0.001), 0.0, 10.0);
                     let bedDepth = pathLength * clamp(abs(viewDir.y), 0.12, 1.0);
                     let contact = smoothstep(0.0, 0.043, pathLength);
 
                     // Wilderness: the waves carried downstream at this stretch's speed, by gravity, in
                     // two crossfaded copies (see FLOW_CYCLE); their own slow roll on top, which
-                    // integer phase multipliers keep seamless.
+                    // integer phase multipliers keep seamless. Steeper water runs rougher.
                     let phase = properties.flowPhase * 6.2831853;
                     let speed = flow.x;
                     let fall = flow.y;
@@ -174,109 +225,232 @@
                     let weightA = 1.0 - abs(2.0 * cycleA - 1.0);
                     let wa = channelWaves(uv, speed * FLOW_CYCLE * cycleA, phase);
                     let wb = channelWaves(uv, speed * FLOW_CYCLE * cycleB, phase);
-                    // The footprint of the pattern on screen, for fading waves finer than a pixel,
-                    // is the same for both copies.
                     let broadWeight = 1.0 - smoothstep(0.65, 2.7, fwidth(wa.roll));
                     let fineWeight = 1.0 - smoothstep(0.65, 2.7, fwidth(wa.ripple));
                     let grainWeight = 1.0 - smoothstep(0.65, 2.7, fwidth(wa.grain));
-                    // Steeper water runs rougher: its waves taller.
-                    let rough = 1.0 + 2.5 * smoothstep(0.01, 0.06, fall);
-                    let waveOf = fn_wave(wa, broadWeight, fineWeight, grainWeight) * weightA
-                               + fn_wave(wb, broadWeight, fineWeight, grainWeight) * (1.0 - weightA);
-                    let wave = waveOf * rough;
+                    let rough = 1.0 + 0.6 * smoothstep(0.03, 0.12, fall);
+                    let wave = (waveHeight(wa, broadWeight, fineWeight, grainWeight) * weightA
+                              + waveHeight(wb, broadWeight, fineWeight, grainWeight) * (1.0 - weightA)) * rough;
 
-                    // Use surface derivatives to tilt the reflection along the curved ribbon.
-                    let bumped = worldPosition + vec3f(0.0, 1.0, 0.0) * wave;
-                    let gradient = cross(dpdx(bumped), dpdy(bumped));
+                    // Use a level tangent plane so the ribbon's triangle slopes cannot
+                    // imprint stripes on the optical normal.
+                    let farRipple = mix(1.0, 0.18, smoothstep(6.0, 15.0, eyeDistance));
+                    let bumped = vec3f(worldPosition.x, wave * properties.waveStrength * farRipple, worldPosition.z);
+                    let surfaceDx = dpdx(bumped);
+                    let surfaceDy = dpdy(bumped);
+                    let gradient = cross(surfaceDx, surfaceDy);
+                    // Recover the horizontal direction of increasing downstream U.
+                    let uDx = dpdx(uv.x);
+                    let uDy = dpdy(uv.x);
+                    let along = vec2f(uDx * surfaceDy.z - uDy * surfaceDx.z,
+                        surfaceDx.x * uDy - surfaceDy.x * uDx) * sign(-gradient.y);
+                    // Wilderness: the rings drawn out as far as the water here runs fast - fully from
+                    // FULL_STRETCH meters a second - not by the whole surface's one current.
+                    let current = properties.obstacleCurrent * clamp(speed / FULL_STRETCH, 0.0, 1.0);
+                    let flowDirection = along * (current / max(length(along), 0.00000001));
                     let upward = vec3f(0.0, 1.0, 0.0);
                     let tangentNormal = gradient * sign(gradient.y) / max(length(gradient), 0.0000001);
-                    let channelNormal = normalize(mix(upward, tangentNormal, 0.82));
+                    // World-space capillary waves remain continuous across UV and mesh seams.
+                    let crossGust = sin(dot(worldPosition.xz, vec2f(3.7, -2.8)) - 2.0 * phase);
+                    let capillaryA = dot(worldPosition.xz, vec2f(25.1, -14.2)) + 1.35 * crossGust - 7.0 * phase;
+                    let capillaryB = dot(worldPosition.xz, vec2f(13.3, 32.6)) - 1.1 * crossGust - 9.0 * phase;
+                    let capillaryWeight = 1.0 - smoothstep(0.38, 2.0,
+                        max(fwidth(capillaryA), fwidth(capillaryB)));
+                    let gust = 0.58 + 0.42 * sin(dot(worldPosition.xz, vec2f(1.4, 2.1)) - phase);
+                    let capillary = (cos(capillaryA) * vec2f(0.031, -0.018)
+                        + cos(capillaryB) * vec2f(0.012, 0.030))
+                        * capillaryWeight * gust * properties.waveStrength;
+                    let channelNormal = normalize(mix(upward, tangentNormal, 0.72)
+                        + vec3f(-capillary.x, 0.0, -capillary.y));
 
-                    // Both surfaces use the same world-space waves in each junction.
+                    if (contact < 0.001) {
+                        return vec4f(0.0);
+                    }
+
+                    // Evaluate shared waves only at active junctions. Use squared distance.
                     var junctionWeight = 0.0;
                     for (var i = 0u; i < 8u; i += 1u) {
                         let junction = properties.confluences[i];
-                        let radius = max(junction.w, 0.001);
-                        let distanceToJoin = distance(worldPosition.xz, junction.xz);
-                        junctionWeight = max(junctionWeight, step(0.001, junction.w)
-                            * (1.0 - smoothstep(radius * 0.35, radius, distanceToJoin)));
+                        if (junction.w > 0.001) {
+                            let delta = worldPosition.xz - junction.xz;
+                            let radius2 = junction.w * junction.w;
+                            junctionWeight = max(junctionWeight,
+                                1.0 - smoothstep(radius2 * 0.1225, radius2, dot(delta, delta)));
+                        }
                     }
-                    let sharedPhase = properties.confluencePhase * 6.2831853;
-                    let commonA = dot(worldPosition.xz, vec2f(5.1, -6.4)) - 2.0 * sharedPhase;
-                    let commonB = dot(worldPosition.xz, vec2f(9.2, 4.8)) - 3.0 * sharedPhase;
-                    let slope = cos(commonA) * vec2f(0.075, -0.094)
-                              + cos(commonB) * vec2f(0.048, 0.025);
-                    let junctionNormal = normalize(vec3f(-slope.x, 1.0, -slope.y));
-                    let normal = normalize(mix(channelNormal, junctionNormal, junctionWeight));
-                    let facing = clamp(dot(normal, viewDir), 0.0, 1.0);
-                    let fresnel = 0.0204 + 0.9796 * pow(1.0 - facing, 5.0);
+                    var normal = channelNormal;
+                    var commonA = 0.0;
+                    var commonB = 0.0;
+                    if (junctionWeight > 0.0) {
+                        let sharedPhase = properties.confluencePhase * 6.2831853;
+                        commonA = dot(worldPosition.xz, vec2f(5.1, -6.4)) - 2.0 * sharedPhase;
+                        commonB = dot(worldPosition.xz, vec2f(9.2, 4.8)) - 3.0 * sharedPhase;
+                        let slope = cos(commonA) * vec2f(0.075, -0.094)
+                                   + cos(commonB) * vec2f(0.048, 0.025);
+                        let junctionNormal = normalize(vec3f(-slope.x, 1.0, -slope.y));
+                        normal = normalize(mix(channelNormal, junctionNormal, junctionWeight));
+                    }
+                    // Surface-piercing obstacles emit damped, outward-moving elliptical rings.
+                    var contactSlope = vec2f(0.0);
+                    for (var i = 0; i < min(properties.obstacleCount, 8); i += 1) {
+                        let obstacle = properties.obstacles[i];
+                        let delta = worldPosition.xz - obstacle.xy;
+                        let radii = max(obstacle.zw, vec2f(0.035));
+                        let scale = min(radii.x, radii.y);
+                        let range = clamp(0.38 + scale, 0.45, 1.4);
+                        if (any(abs(delta) >= radii + vec2f(range * 1.95))) { continue; }
+                        let ellipse = delta / radii;
+                        let radial = length(ellipse);
+                        let distanceFromObstacle = (radial - 1.0) * scale;
+                        let heading = dot(delta, flowDirection) / max(length(delta), 0.001)
+                            * (1.0 - junctionWeight);
+                        // Keep the wave anchored to the contact ellipse while changing its spacing.
+                        let stretch = 1.0 + 0.95 * max(heading, 0.0)
+                            + 0.26 * min(heading, 0.0);
+                        let clearance = distanceFromObstacle / stretch;
+                        if (clearance <= -0.018 || clearance >= range) { continue; }
+                        let envelope = smoothstep(-0.018, 0.055, clearance)
+                            * (1.0 - smoothstep(0.09, range, clearance))
+                            * (1.0 - smoothstep(9.0, 20.0, eyeDistance));
+                        let outward = ellipse / radii * (scale / max(radial, 0.001));
+                        let angle = 6.2831853 * properties.obstaclePhase;
+                        let ring = 0.083 * cos(25.0 * clearance - angle)
+                            + 0.028 * cos(43.0 * clearance - 2.0 * angle + ellipse.x * 0.9);
+                        contactSlope += outward * ring * envelope / stretch;
+                    }
+                    if (dot(contactSlope, contactSlope) > 0.0) {
+                        normal = normalize(normal - vec3f(contactSlope.x, 0.0, contactSlope.y));
+                    }
+                    let grazing = 1.0 - clamp(dot(normal, viewDir), 0.0, 1.0);
+                    let grazing2 = grazing * grazing;
+                    let fresnel = 0.0204 + 0.9796 * grazing2 * grazing2 * grazing;
                     let reflected = reflect(-viewDir, normal);
 
                     // Analytic sky reflection and a broad, broken highlight from the main light.
                     let skyHeight = smoothstep(-0.08, 0.58, reflected.y);
                     let sky = mix(vec3f(0.19, 0.23, 0.24), vec3f(0.32, 0.42, 0.55), skyHeight);
-                    let sun = normalize(properties.sunDirection);
+                    // FlowingWater ships a unit direction for the sun.
+                    let sun = properties.sunDirection;
+                    let daylight = smoothstep(-0.12, 0.22, sun.y);
                     var highlight = pow(clamp(dot(reflected, sun), 0.0, 1.0), 105.0);
                     highlight *= smoothstep(0.015, 0.16, sun.y)
                                * mix(0.45 + 0.55 * broadWeight, 1.0, junctionWeight);
-                    // Wilderness: under a forest, most of what the water mirrors is trees and banks,
-                    // dark, not the open sky the gradient stands for: the sky is a share of it.
-                    let reflection = (sky * fresnel * SKY_SEEN + vec3f(1.0, 0.88, 0.67) * highlight * 0.37) * properties.light;
+                    // Wilderness: under a forest, most of what the water mirrors is trees and banks:
+                    // where the trace below misses them, less of the sky.
+                    var reflectedScene = sky * SKY_SEEN * mix(0.09, 1.0, daylight);
+                    let reflectionBudget = clamp(properties.reflectionWeight, 0.0, 1.0)
+                        * smoothstep(0.11, 0.29, fresnel)
+                        * (1.0 - smoothstep(12.0, 24.0, eyeDistance));
+                    if (reflectionBudget > 0.0 && reflected.y > 0.015) {
+                        let hit = traceReflection(worldPosition, reflected);
+                        reflectedScene = mix(reflectedScene, hit.rgb, hit.a * reflectionBudget);
+                    }
+                    let reflection = reflectedScene * fresnel + vec3f(1.0, 0.88, 0.67) * highlight * 0.15;
 
                     let absorption = 1.0 - exp(-1.18 * pathLength);
-                    // Wilderness: the water's own colour, and its foam's, are lit as the renderer lights
-                    // a surface, its colour over pi: as bright as the loam beside it, not as a picture.
-                    let surfaceLight = properties.light / 3.14159265;
-                    let body = mix(vec3f(0.088, 0.103, 0.060), vec3f(0.019, 0.062, 0.054), absorption) * surfaceLight;
+                    // Wilderness: the water's own colour, and its foam's, lit as the renderer lights a
+                    // surface, its colour over pi: as bright as the loam beside it.
+                    let surfaceLight = 1.0 / 3.14159265;
+                    let body = mix(vec3f(0.088, 0.103, 0.060), vec3f(0.019, 0.062, 0.054), absorption) * mix(0.22, 1.0, daylight) * surfaceLight;
 
-                    // Leave most of the shoreline clear. Foam collects in broken streaks at contacts.
+                    // Foam is a shallow contact effect. Keep the deep channel clear.
+                    // Wilderness: the patches crossfaded with the waves' two copies.
                     let patchesA = 0.53 + 0.25 * sin(wa.roll * 2.0 + 0.55 * sin(wa.ripple)) + 0.19 * sin(wa.grain - wa.roll);
                     let patchesB = 0.53 + 0.25 * sin(wb.roll * 2.0 + 0.55 * sin(wb.ripple)) + 0.19 * sin(wb.grain - wb.roll);
-                    let channelPatches = mix(patchesB, patchesA, weightA);
-                    let patches = mix(channelPatches, 0.52 + 0.22 * sin(commonA) + 0.14 * sin(commonB), junctionWeight);
-                    let foamBand = smoothstep(0.012, 0.052, bedDepth)
-                                   * (1.0 - smoothstep(0.065, 0.24, bedDepth));
-                    // Wilderness: foam gathers in clumps along a bank, not evenly: broken up by a
-                    // slow pattern laid on the ground, so its streaks come and go unevenly.
-                    let p = worldPosition.xz;
-                    let clumps = smoothstep(0.38, 0.72, 0.5 + 0.3 * sin(p.x * 1.7 + p.y * 0.6) * sin(p.y * 1.3 - p.x * 0.4)
-                                                        + 0.2 * sin(p.x * 3.1 - p.y * 2.3));
-                    var foam = foamBand * clumps * smoothstep(0.57, 0.91, patches)
-                               * mix(0.28 + 0.72 * fineWeight, 0.65, junctionWeight) * properties.foamStrength;
-                    // Wilderness: white water where it falls steeply.
-                    let whiteWater = smoothstep(0.03, 0.09, fall) * 0.55;
-                    foam = max(foam, whiteWater * smoothstep(0.64, 0.92, patches) * fineWeight * properties.foamStrength);
-
-                    // Wilderness: the bed seen through the water, bent by its ripples: more through
-                    // deeper water, less far off, not at all at the shore. Where the bent view would
-                    // land on something in front of the water - a bank, a stone - it goes straight.
-                    let screen = vec2f(textureDimensions(sceneColor_tex, 0));
-                    let straightUv = fragCoord.xy / screen;
-                    let bend = normal.xz * (REFRACTION * min(bedDepth, REFRACTION_DEPTH) * contact / max(fragmentDepth, 1.0));
-                    var bentUv = clamp(straightUv + bend, vec2f(0.0), vec2f(1.0));
-                    let bentDepth = textureLoad(fyrox_sceneDepth_tex, vec2i(bentUv * screen), 0);
-                    if (linearDepth(bentDepth) < fragmentDepth) {
-                        bentUv = straightUv;
+                    var foam = 0.0;
+                    if (bedDepth > 0.012 && bedDepth < 0.24 && properties.foamStrength > 0.0) {
+                        let channelPatches = mix(patchesB, patchesA, weightA);
+                        var patches = channelPatches;
+                        if (junctionWeight > 0.0) {
+                            patches = mix(channelPatches,
+                                0.52 + 0.22 * sin(commonA) + 0.14 * sin(commonB), junctionWeight);
+                        }
+                        let band = smoothstep(0.012, 0.045, bedDepth)
+                                   * (1.0 - smoothstep(0.082, 0.24, bedDepth));
+                        // Twisted filaments break contacts into small patches and reveal water between them.
+                        // Wilderness: crossfaded with the waves' two copies.
+                        let filamentA = 0.5 + 0.5 * sin(2.3 * wa.ripple + 0.75 * sin(wa.grain)
+                            + dot(worldPosition.xz, vec2f(2.8, -4.1)));
+                        let filamentB = 0.5 + 0.5 * sin(2.3 * wb.ripple + 0.75 * sin(wb.grain)
+                            + dot(worldPosition.xz, vec2f(2.8, -4.1)));
+                        let filament = mix(filamentB, filamentA, weightA);
+                        let bubbles = 0.5 + 0.5 * sin(capillaryA + 0.8 * sin(capillaryB));
+                        let channelDetail = mix(0.62, filament * (0.58 + 0.42 * bubbles), capillaryWeight);
+                        let detail = mix(channelDetail, 0.65, junctionWeight);
+                        foam = band * smoothstep(0.51, 0.89, patches) * detail
+                             * mix(0.30 + 0.70 * fineWeight, 0.65, junctionWeight) * properties.foamStrength;
                     }
-                    let behind = textureSample(sceneColor_tex, sceneColor_samp, bentUv).rgb;
+                    // Wilderness: white water where it falls steeply.
+                    let whiteWater = smoothstep(0.08, 0.2, fall) * 0.35;
+                    foam = max(foam, whiteWater * smoothstep(0.80, 0.97, mix(patchesB, patchesA, weightA)) * fineWeight * properties.foamStrength);
 
-                    // Convert premultiplied terms to the straight alpha the surface lies over the
-                    // bed by.
+                    // Convert premultiplied terms to the forward pass's straight-alpha blend.
                     let bodyWeight = absorption * (1.0 - fresnel);
                     var alpha = clamp((bodyWeight + fresnel + 0.23 * highlight) * contact, 0.0, 1.0);
                     var premultiplied = (body * bodyWeight + reflection) * contact;
-                    premultiplied = mix(premultiplied, vec3f(0.68, 0.76, 0.68) * surfaceLight, foam);
+                    // Fade refraction before distant or deep water would hide the riverbed.
+                    let refraction = clamp(properties.sceneColorWeight, 0.0, 1.0)
+                        * smoothstep(0.02, 0.10, pathLength)
+                        * (1.0 - smoothstep(1.6, 3.6, pathLength))
+                        * (1.0 - smoothstep(28.0, 58.0, eyeDistance))
+                        * (1.0 - smoothstep(0.65, 0.95, fresnel));
+                    if (refraction > 0.0) {
+                        let size = vec2f(textureDimensions(fyrox_sceneColor_tex, 0));
+                        let screen = fragCoord.xy / size;
+                        let incident = -viewDir;
+                        let transmitted = refract(incident, normal, 1.0 / 1.333);
+                        let surfaceClip = fyrox_cameraData.viewProjectionMatrix * vec4f(worldPosition, 1.0);
+                        let travel = min(pathLength, 2.4);
+                        let targetClip = fyrox_cameraData.viewProjectionMatrix
+                            * vec4f(worldPosition + transmitted * travel, 1.0);
+                        var sampleUv = screen;
+                        if (targetClip.w > 0.001 && surfaceClip.w > 0.001) {
+                            let projectionOffset = (targetClip.xy / targetClip.w
+                                - surfaceClip.xy / surfaceClip.w) * vec2f(0.5, -0.5);
+                            let offset = clamp(projectionOffset, vec2f(-0.04), vec2f(0.04));
+                            // Wilderness: the bed wobbles under shallow water too (plant_life's
+                            // ramp, 0.04 to 0.32 m, left a stream's bed all but still).
+                            let candidate = screen + offset * mix(0.45, 1.0, smoothstep(0.04, 0.32, pathLength));
+                            if (all(candidate > vec2f(0.001)) && all(candidate < vec2f(0.999))) {
+                                let candidateDepth = textureLoad(fyrox_sceneDepth_tex, vec2i(candidate * size), 0);
+                                let clearance = linearDepth(candidateDepth) - fragmentDepth;
+                                sampleUv = mix(screen, candidate, smoothstep(0.025, 0.14, clearance));
+                            }
+                        }
+                        var bed = textureSampleLevel(fyrox_sceneColor_tex, fyrox_sceneColor_samp, sampleUv, 0.0).rgb;
+                        // Modulate the existing bed sample with faint, moving caustics.
+                        let causticWeight = daylight * fineWeight
+                            * smoothstep(0.05, 0.13, bedDepth) * (1.0 - smoothstep(0.25, 0.65, bedDepth));
+                        if (causticWeight > 0.0) {
+                            // Wilderness: crossfaded with the waves' two copies.
+                            let channelCrest = mix(0.5 + 0.5 * sin(wb.ripple + 0.6 * sin(wb.roll)),
+                                                   0.5 + 0.5 * sin(wa.ripple + 0.6 * sin(wa.roll)), weightA);
+                            let sharedCrest = 0.5 + 0.5 * sin(commonA + 0.6 * sin(commonB));
+                            let crest = mix(channelCrest, sharedCrest, junctionWeight);
+                            let fold = mix(0.73 + 0.27 * sin(wb.roll - wb.ripple),
+                                           0.73 + 0.27 * sin(wa.roll - wa.ripple), weightA);
+                            let ridge = crest * crest * mix(fold, 0.86, junctionWeight);
+                            bed *= 1.0 + causticWeight * (0.24 * ridge * ridge - 0.047);
+                        }
+                        // Wilderness: a bed under water is wet - darker, and a little green
+                        // from what grows on its stones - so that even a few centimeters of
+                        // clear water show where they lie, as a stream's do.
+                        bed *= WET_BED;
+                        let transmission = exp(-vec3f(0.88, 0.38, 0.30) * pathLength);
+                        let inScatter = body * (vec3f(1.0) - transmission);
+                        let throughWater = (bed * transmission + inScatter) * (1.0 - fresnel);
+                        premultiplied = mix(premultiplied, (throughWater + reflection) * contact, refraction);
+                        alpha = mix(alpha, contact, refraction);
+                    }
+                    premultiplied = mix(premultiplied, vec3f(0.68, 0.76, 0.68) * mix(0.16, 1.0, daylight) * surfaceLight, foam);
                     alpha = mix(alpha, 1.0, foam);
 
                     // Wilderness: hazed as the fog pass would have.
-                    let eyeAt = fyrox_cameraData.position;
-                    let hazeReach = max(length(eye) - properties.hazeStart, 0.0);
-                    let above = max(0.5 * (worldPosition.y + eyeAt.y) - properties.hazeBase, 0.0);
+                    let hazeReach = max(eyeDistance - properties.hazeStart, 0.0);
+                    let above = max(0.5 * (worldPosition.y + fyrox_cameraData.position.y) - properties.hazeBase, 0.0);
                     let haze = 1.0 - exp(-properties.hazeDensity * exp(-properties.hazeFalloff * above) * hazeReach);
                     let straight = mix(premultiplied / max(alpha, 0.001), properties.hazeColor, haze);
-                    // Wilderness: over the bed, as the forward pass's blend laid it.
-                    let cover = mix(alpha, 1.0, haze * contact);
-                    return vec4f(mix(behind, straight, cover), 1.0);
+                    return vec4f(straight, mix(alpha, 1.0, haze * contact));
                 }
                "#,
         )

@@ -315,6 +315,32 @@ impl Floor {
             .to_base()
     }
 
+    /// The rocks' bounds, least corner and most: their solid shapes' (as `build_rocks` makes
+    /// them, turned with them), or for a cobble, which has none, its spread and height. For the
+    /// water to ripple round those that stand in it.
+    pub fn rock_bounds(&self) -> Vec<(Vector3<f32>, Vector3<f32>)> {
+        self.chunks
+            .iter()
+            .flat_map(|c| &c.placements)
+            .filter_map(|placement| {
+                let rock = placement.rock()?;
+                let (sin, cos) = (placement.yaw.sin().abs(), placement.yaw.cos().abs());
+                let (half, bottom) = match rock.solid {
+                    Some(solid) => {
+                        let half = solid * placement.scale;
+                        (Vector3::new(cos * half.x + sin * half.z, half.y, sin * half.x + cos * half.z), -rock.sink * 2.0 * half.y)
+                    }
+                    None => {
+                        let (radius, height) = (rock.kind.radius * placement.scale, rock.kind.height * placement.scale);
+                        (Vector3::new(radius, 0.5 * height, radius), -rock.sink * height)
+                    }
+                };
+                let low = placement.position + Vector3::new(-half.x, bottom, -half.z);
+                Some((low, low + Vector3::new(2.0 * half.x, 2.0 * half.y, 2.0 * half.z)))
+            })
+            .collect()
+    }
+
     /// Puts the plants near enough `player` into the scene and takes far ones out (at most a
     /// few hundred a frame, unless `all`), and sways those in it.
     pub fn update(
@@ -633,6 +659,40 @@ fn shores(seed: u64, terrain: &Terrain, thicket: &Thicket, obstacles: &mut Obsta
                         place(chunks, kind, at, yaw, scale);
                     }
                 }
+            }
+        }
+    }
+    // The ponds' and springs' wet margins, as the Birch Glade dresses them: round every other
+    // point of the water's edge, a little in or out, a cobble now and then, else hard fern, wood
+    // melick or heather (not in the water); and at each spring, three boulders behind it, away
+    // from its outlet, standing in its water.
+    let heather = index_of("Common heather");
+    for (b, basin) in terrain.basins.iter().enumerate() {
+        let mut random = Random::for_place(seed, b as i64, 0xba51);
+        for i in (1..=72).step_by(2) {
+            let angle = std::f32::consts::TAU * (i - 1) as f32 / 72.0;
+            let edge = basin.at(angle, crate::terrain::BASIN_WATER);
+            let at = basin.center + (edge - basin.center) * random.between(0.86, 1.14);
+            let yaw = random.between(0.0, std::f32::consts::TAU);
+            if random.unit() < 0.30 {
+                let size = random.between(0.26, 0.69);
+                obstacles.add(at, ROCKS[2].kind.radius * size * 0.8);
+                place(chunks, cobble, at, yaw, size);
+            } else {
+                let kind = [fern, melick, melick, heather][(random.unit() * 4.0) as usize % 4];
+                let scale = random.between(0.64, 1.08);
+                if !terrain.wet(at.x, at.y, 0.0) && !obstacles.blocked(at, 0.3 * PLANTS[kind].radius * scale) {
+                    place(chunks, kind, at, yaw, scale);
+                }
+            }
+        }
+        if let Some((outlet, _)) = basin.outlet {
+            // The Birch Glade's, its outlet toward +x, turned to this one's.
+            let (sin, cos) = (outlet.sin(), outlet.cos());
+            for (dx, dz, scale) in [(-1.07, -0.35, 0.82), (-0.98, 0.42, 0.67), (-0.64, 0.63, 0.52)] {
+                let at = basin.center + Vector2::new(dx * cos - dz * sin, dx * sin + dz * cos);
+                obstacles.add(at, ROCKS[0].kind.radius * scale);
+                place(chunks, boulder, at, random.between(0.0, std::f32::consts::TAU), scale);
             }
         }
     }
