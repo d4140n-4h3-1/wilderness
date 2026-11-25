@@ -55,9 +55,9 @@ use fyrox::{
 };
 use fyrox::{graph::SceneGraph, material::MaterialResourceExtension};
 
-/// Which forest grows, unless WILDERNESS_SEED says otherwise: a river valley with three ponds
-/// within a short walk of the start.
-pub const SEED: u64 = 15;
+/// Which forest grows, unless WILDERNESS_SEED says otherwise: a river valley with a pond a short
+/// walk from the start, alders along its streams and willows on its river not far off.
+pub const SEED: u64 = 6;
 /// Light from the sky on the side of things the sun is not on.
 const AMBIENT: Color = Color::opaque(128, 136, 146);
 /// The sun: warm, in the afternoon.

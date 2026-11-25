@@ -45,8 +45,9 @@ pub struct Species {
 }
 
 /// Every kind of tree in the forest. Conifers make up most of it; larch, birch, rowan and oak,
-/// which need light, gather where the forest opens up.
-pub const SPECIES: [Species; 7] = [
+/// which need light, gather where the forest opens up. Alder and willow grow only by the water
+/// (see [`waterside`]): never in the forest at large, so their weight is nothing.
+pub const SPECIES: [Species; 9] = [
     Species {
         name: "Norway spruce",
         path: "data/trees/norway-spruce.glb",
@@ -110,7 +111,29 @@ pub const SPECIES: [Species; 7] = [
         trunk: 0.45,
         wind: wind::DECIDUOUS,
     },
+    // An upright crown, for narrow stream banks.
+    Species {
+        name: "Common alder",
+        path: "data/trees/common-alder.glb",
+        weight: 0.0,
+        likes_light: false,
+        crown: 2.6,
+        trunk: 0.22,
+        wind: wind::DECIDUOUS,
+    },
+    // A spreading crown of about 12 m, drooping over the bank.
+    Species {
+        name: "White willow",
+        path: "data/trees/white-willow.glb",
+        weight: 0.0,
+        likes_light: true,
+        crown: 6.0,
+        trunk: 0.35,
+        wind: wind::DECIDUOUS,
+    },
 ];
+const ALDER: usize = 7;
+const WILLOW: usize = 8;
 
 /// How thick the forest is, anywhere: from 0 in a glade to 1 in a thicket. The trees thin out
 /// where it is low, and the forest floor and its wind follow it.
@@ -174,7 +197,12 @@ pub fn lay_out(seed: u64, terrain: &Terrain) -> Vec<Tree> {
         (x.min(cells_across - 1), z.min(cells_across - 1))
     };
 
-    let mut trees: Vec<Tree> = Vec::new();
+    // The waterside trees first, the forest round them.
+    let mut trees: Vec<Tree> = waterside(seed, terrain, &glades);
+    for (index, tree) in trees.iter().enumerate() {
+        let (cx, cz) = cell_of(tree.position);
+        cells[cz * cells_across + cx].push(index);
+    }
     for _ in 0..TRIES {
         let position = Vector3::new(
             random.between(-HALF_EXTENT, HALF_EXTENT),
@@ -234,13 +262,148 @@ fn pick_species(random: &mut Random, thickness: f32) -> usize {
     };
     let total: f32 = SPECIES.iter().map(weight).sum();
     let mut pick = random.unit() * total;
-    for (index, species) in SPECIES.iter().enumerate() {
+    let mut last = 0;
+    for (index, species) in SPECIES.iter().enumerate().filter(|(_, s)| s.weight > 0.0) {
         pick -= weight(species);
+        last = index;
         if pick <= 0.0 {
             return index;
         }
     }
-    SPECIES.len() - 1
+    last
+}
+
+/// How far up the bank from the waterline a waterside trunk stands, in meters, least and most:
+/// on the bank, above the ordinary waterline, not in the water.
+const BANK: (f32, f32) = (1.0, 3.5);
+/// How far from where a stream reaches the river no waterside tree stands, in meters: the
+/// crossings and wading routes kept clear.
+const CROSSINGS_CLEAR: f32 = 12.0;
+
+/// The trees by the water, as plant_life's note places them (its CLAUDE.md, with the common
+/// alder and the white willow): alders in small groups along the damp, narrow stream banks -
+/// thickest near the springs, as round the Birch Glade's Alder Spring - round every spring, and
+/// at each pond's shadiest edge; willows here and there on sunny, open stretches of the river,
+/// and at the sunniest edge of a broad pond, with room for their crowns. Every trunk on the bank,
+/// above the waterline; none where a stream crosses into the river; each turned and sized its
+/// own way.
+fn waterside(seed: u64, terrain: &Terrain, glades: &Thicket) -> Vec<Tree> {
+    use fyrox::core::algebra::Vector2;
+    let mut random = Random(seed ^ 0xa1de_7111_0000_0001);
+    let mut trees: Vec<Tree> = Vec::new();
+    let crossings: Vec<Vector2<f32>> = terrain.channels[1..].iter().map(|c| *c.points.last().expect("a stream has points")).collect();
+    let mut stand = |trees: &mut Vec<Tree>, random: &mut Random, species: usize, at: Vector2<f32>| {
+        let scale = random.between(SCALE.0, SCALE.1);
+        let (reach, trunk) = (SPECIES[species].crown * scale, SPECIES[species].trunk * scale);
+        let fits = at.x.abs() <= HALF_EXTENT
+            && at.y.abs() <= HALF_EXTENT
+            && at.norm() >= CLEARING + reach
+            && !terrain.wet(at.x, at.y, trunk + 0.3)
+            && crossings.iter().all(|c| (c - at).norm() >= CROSSINGS_CLEAR)
+            && trees.iter().all(|other| {
+                let apart = (reach + SPECIES[other.species].crown * other.scale) * SPACING;
+                (other.position.xz() - at).norm() >= apart
+            });
+        if !fits {
+            return false;
+        }
+        let ground = [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0), (0.0, 0.0)]
+            .iter()
+            .map(|(dx, dz)| terrain.height(at.x + dx * trunk, at.y + dz * trunk))
+            .fold(f32::MAX, f32::min);
+        trees.push(Tree {
+            species,
+            position: Vector3::new(at.x, ground, at.y),
+            yaw: random.between(0.0, std::f32::consts::TAU),
+            scale,
+        });
+        true
+    };
+    // A small group of `count` alders about `at`, `outward` from the water: each tried a few
+    // times, a little along the bank and up it.
+    let group = |trees: &mut Vec<Tree>, random: &mut Random, edge: Vector2<f32>, outward: Vector2<f32>, count: usize, stand: &mut dyn FnMut(&mut Vec<Tree>, &mut Random, usize, Vector2<f32>) -> bool| {
+        let along = Vector2::new(-outward.y, outward.x);
+        let mut placed = 0;
+        for _ in 0..count * 6 {
+            if placed >= count {
+                break;
+            }
+            let at = edge + outward * random.between(BANK.0, BANK.1) + along * random.between(-4.0, 4.0);
+            if stand(trees, random, ALDER, at) {
+                placed += 1;
+            }
+        }
+    };
+
+    // Round every spring, away from its outlet: a group of two to four.
+    for basin in terrain.basins.iter().filter(|b| b.is_spring()) {
+        let (outlet, _) = basin.outlet.expect("a spring has an outlet");
+        let count = 2 + (random.unit() * 3.0) as usize;
+        for _ in 0..count * 4 {
+            let angle = outlet + random.between(0.9, std::f32::consts::TAU - 0.9);
+            let edge = basin.at(angle, 1.0);
+            let outward = (edge - basin.center).try_normalize(1e-6).unwrap_or(Vector2::x());
+            let at = edge + outward * random.between(BANK.0, BANK.1);
+            stand(&mut trees, &mut random, ALDER, at);
+        }
+    }
+    // Along every stream, in small groups on alternate banks: closer together near its spring.
+    for channel in &terrain.channels[1..] {
+        let total = *channel.distances.last().expect("a channel has points");
+        let mut along = random.between(3.0, 8.0);
+        let mut side = (random.unit() < 0.5) as usize;
+        while along < total {
+            let i = channel.distances.partition_point(|&d| d < along).min(channel.points.len() - 1);
+            let outward = crate::terrain::side_of(&channel.points, i) * if side == 0 { -1.0 } else { 1.0 };
+            let edge = channel.points[i] + outward * channel.waterlines[i][side];
+            let count = 1 + (random.unit() * 3.0) as usize;
+            group(&mut trees, &mut random, edge, outward, count, &mut stand);
+            side = 1 - side;
+            along += if along < 40.0 { random.between(10.0, 16.0) } else { random.between(20.0, 34.0) };
+        }
+    }
+    // Round the ponds: alders at the shadiest edge, and at a broad pond, a willow at the sunniest.
+    for basin in terrain.basins.iter().filter(|b| !b.is_spring()) {
+        let edges: Vec<(f32, Vector2<f32>)> = (0..16)
+            .map(|k| {
+                let edge = basin.at(k as f32 * std::f32::consts::TAU / 16.0, 1.0);
+                (glades.at(edge.x, edge.y), edge)
+            })
+            .collect();
+        let outward = |edge: Vector2<f32>| (edge - basin.center).try_normalize(1e-6).unwrap_or(Vector2::x());
+        let shadiest = edges.iter().copied().fold(edges[0], |a, b| if b.0 > a.0 { b } else { a }).1;
+        let count = 2 + (random.unit() * 2.0) as usize;
+        group(&mut trees, &mut random, shadiest, outward(shadiest), count, &mut stand);
+        if basin.radii.x * basin.radii.y > 9.0 {
+            let sunniest = edges.iter().copied().fold(edges[0], |a, b| if b.0 < a.0 { b } else { a }).1;
+            for _ in 0..6 {
+                let at = sunniest + outward(sunniest) * random.between(BANK.0 + 1.0, BANK.1 + 1.0);
+                if stand(&mut trees, &mut random, WILLOW, at) {
+                    break;
+                }
+            }
+        }
+    }
+    // Willows on the river's open stretches, here and there, where the canopy is thin.
+    let river = &terrain.channels[0];
+    let total = *river.distances.last().expect("a channel has points");
+    let mut along = random.between(10.0, 40.0);
+    while along < total {
+        let i = river.distances.partition_point(|&d| d < along).min(river.points.len() - 1);
+        let side = (random.unit() < 0.5) as usize;
+        let outward = crate::terrain::side_of(&river.points, i) * if side == 0 { -1.0 } else { 1.0 };
+        let edge = river.points[i] + outward * river.waterlines[i][side];
+        if glades.at(edge.x, edge.y) < 0.45 {
+            for _ in 0..4 {
+                let at = edge + outward * random.between(BANK.0 + 0.5, BANK.1) + Vector2::new(random.between(-2.0, 2.0), random.between(-2.0, 2.0));
+                if stand(&mut trees, &mut random, WILLOW, at) {
+                    break;
+                }
+            }
+        }
+        along += random.between(35.0, 60.0);
+    }
+    trees
 }
 
 /// Puts the forest into the scene: a copy of its model for every tree, under one node, and a
@@ -363,6 +526,34 @@ mod tests {
         let trees = lay_out(1, &Terrain::new(1));
         for index in 0..SPECIES.len() {
             assert!(trees.iter().any(|t| t.species == index), "no {}", SPECIES[index].name);
+        }
+    }
+
+    #[test]
+    fn alders_and_willows_stand_on_the_banks_clear_of_the_crossings() {
+        for seed in [1, crate::game::SEED] {
+            let terrain = Terrain::new(seed);
+            let trees = lay_out(seed, &terrain);
+            let by_water: Vec<&Tree> = trees.iter().filter(|t| t.species == ALDER || t.species == WILLOW).collect();
+            assert!(by_water.iter().filter(|t| t.species == ALDER).count() >= 15, "seed {seed}: few alders");
+            assert!(by_water.iter().any(|t| t.species == WILLOW), "seed {seed}: no willow");
+            for tree in by_water {
+                let (x, z) = (tree.position.x, tree.position.z);
+                // On the bank: out of the water, and near it.
+                assert!(!terrain.wet(x, z, SPECIES[tree.species].trunk * tree.scale), "seed {seed}: {} in the water at {x}, {z}", SPECIES[tree.species].name);
+                // (Measured to the nearest water's edge: `wet` sees a stream only within its cut.)
+                let at = tree.position.xz();
+                let channels = terrain.channels.iter().flat_map(|c| {
+                    c.points.iter().zip(&c.waterlines).map(move |(p, [right, left])| (p - at).norm() - right.max(*left))
+                });
+                let basins = terrain.basins.iter().map(|b| b.from_waterline(x, z));
+                let off = channels.chain(basins).fold(f32::MAX, f32::min);
+                // Up the bank as placed, and a few meters along it round a bend.
+                assert!(off < BANK.1 + 4.5, "seed {seed}: {} {off} m from the water at {x}, {z}", SPECIES[tree.species].name);
+                for stream in &terrain.channels[1..] {
+                    assert!((stream.points.last().unwrap() - tree.position.xz()).norm() >= CROSSINGS_CLEAR);
+                }
+            }
         }
     }
 }
