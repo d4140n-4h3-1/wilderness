@@ -37,6 +37,10 @@
                 // stretch's own speed (see the vertex normal); and the haze, as the renderer's fog
                 // pass lays it, which the water, drawn after that pass, must lay over itself.
                 (name: "flowTime", kind: Float(value: 0.0)),
+                // Wilderness: the sky's own colours now, linear, overhead and at the horizon, for
+                // the water to mirror where its trace finds nothing nearer.
+                (name: "skyZenith", kind: Vector3(value: (0.32, 0.42, 0.55))),
+                (name: "skyHorizon", kind: Vector3(value: (0.19, 0.23, 0.24))),
                 (name: "hazeColor", kind: Vector3(value: (0.45, 0.53, 0.6))),
                 (name: "hazeDensity", kind: Float(value: 0.0)),
                 (name: "hazeStart", kind: Float(value: 0.0)),
@@ -328,7 +332,8 @@
 
                     // Analytic sky reflection and a broad, broken highlight from the main light.
                     let skyHeight = smoothstep(-0.08, 0.58, reflected.y);
-                    let sky = mix(vec3f(0.19, 0.23, 0.24), vec3f(0.32, 0.42, 0.55), skyHeight);
+                    // Wilderness: the sky as it is now (see `sky.shader`), not a fixed pale grey.
+                    let sky = mix(properties.skyHorizon, properties.skyZenith, skyHeight);
                     // FlowingWater ships a unit direction for the sun.
                     let sun = properties.sunDirection;
                     let daylight = smoothstep(-0.12, 0.22, sun.y);
@@ -337,9 +342,11 @@
                                * mix(0.45 + 0.55 * broadWeight, 1.0, junctionWeight);
                     // Wilderness: under a forest, most of what the water mirrors is trees and banks:
                     // where the trace below misses them, less of the sky.
-                    var reflectedScene = sky * SKY_SEEN * mix(0.09, 1.0, daylight);
+                    // (The sky's colours already dim with the day.)
+                    var reflectedScene = sky * SKY_SEEN;
+                    // Wilderness: the scenery mirrored at every angle, not only grazing ones - the
+                    // fresnel term below still decides how much of it shows.
                     let reflectionBudget = clamp(properties.reflectionWeight, 0.0, 1.0)
-                        * smoothstep(0.11, 0.29, fresnel)
                         * (1.0 - smoothstep(12.0, 24.0, eyeDistance));
                     if (reflectionBudget > 0.0 && reflected.y > 0.015) {
                         let hit = traceReflection(worldPosition, reflected);

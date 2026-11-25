@@ -75,12 +75,17 @@ const SPRING_CONFLUENCE_RADIUS: f32 = 3.0;
 const POND_ROLL: f32 = 0.035;
 const POND_ACTIVITY: (f32, f32) = (0.30, 0.0);
 const SPRING_ROLL: f32 = 0.10;
-const SPRING_ACTIVITY: (f32, f32) = (0.52, 0.16);
+const SPRING_ACTIVITY: (f32, f32) = (0.52, FOAM);
 /// How strongly each kind of water mirrors the scenery near it: as plant_life's sample.
-const RIVER_REFLECTION: f32 = 0.55;
-const STREAM_REFLECTION: f32 = 0.35;
-const SPRING_REFLECTION: f32 = 0.60;
-const POND_REFLECTION: f32 = 0.78;
+/// (All of them fully: clearer water mirrors more. plant_life's sample has 0.55, 0.35, 0.60 and
+/// 0.78.)
+const RIVER_REFLECTION: f32 = 1.0;
+const STREAM_REFLECTION: f32 = 1.0;
+const SPRING_REFLECTION: f32 = 1.0;
+const POND_REFLECTION: f32 = 1.0;
+/// How much foam the water has: none, so that it is clear, not milky (plant_life's is 0.72, and
+/// its springs' 0.16).
+const FOAM: f32 = 0.0;
 /// How many contacts a surface's shader takes, and how many times a second their rings go out.
 const MOST_CONTACTS: usize = 8;
 /// Which way along the water's flow coordinates its current runs, for the rings round what stands
@@ -272,7 +277,11 @@ impl Water {
     /// even at night, as the shader dims its reflection and foam by how far down it is), hazed as
     /// `scene`'s fog is now; seen from `eye`, and the one moving thing that may stand in it lying
     /// within `wading` (least corner and most), rippling round it as round the rocks.
-    pub fn update(&mut self, scene: &Scene, toward_sun: Vector3<f32>, eye: Vector3<f32>, wading: (Vector3<f32>, Vector3<f32>), dt: f32) {
+    ///
+    /// `sky` is the sky's colours now, overhead and at the horizon (sRGB), when days go by, for
+    /// the water to mirror.
+    #[allow(clippy::too_many_arguments)]
+    pub fn update(&mut self, scene: &Scene, toward_sun: Vector3<f32>, sky: Option<(Color, Color)>, eye: Vector3<f32>, wading: (Vector3<f32>, Vector3<f32>), dt: f32) {
         self.elapsed = (self.elapsed + dt) % FLOW_CLOCK;
         self.rings = (self.rings + dt * CONTACT_RINGS).rem_euclid(1.0);
         let linear = |c: Color| {
@@ -299,6 +308,10 @@ impl Water {
             material.set_property("flowTime", self.elapsed);
             material.set_property("confluencePhase", shared);
             material.set_property("sunDirection", toward_sun);
+            if let Some((zenith, horizon)) = sky {
+                material.set_property("skyZenith", linear(zenith));
+                material.set_property("skyHorizon", linear(horizon));
+            }
             if let Some(fog) = fog {
                 material.set_property("hazeColor", linear(fog.color));
                 material.set_property("hazeDensity", fog.density);
@@ -318,6 +331,7 @@ fn water_material(shader: &ShaderResource, mirror: f32) -> MaterialResource {
     let mut material = Material::from_shader(shader.clone());
     material.set_property("sceneColorWeight", 1.0f32);
     material.set_property("reflectionWeight", mirror);
+    material.set_property("foamStrength", FOAM);
     MaterialResource::new_ok(Uuid::new_v4(), ResourceKind::Embedded, material)
 }
 

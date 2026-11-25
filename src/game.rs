@@ -548,7 +548,11 @@ impl Plugin for Wilderness {
         let feet = self.player.feet(&scene.graph);
         let wading = (feet - Vector3::new(0.3, 0.0, 0.3), feet + Vector3::new(0.3, 1.8, 0.3));
         let eye = scene.graph[self.player.camera()].global_position();
-        self.water.update(scene, toward_sun, eye, wading, ctx.dt);
+        let sky = self.day.as_ref().map(|day| {
+            let lit = day.lighting();
+            (lit.zenith, lit.haze)
+        });
+        self.water.update(scene, toward_sun, sky, eye, wading, ctx.dt);
         self.flashlight.update(&mut scene.graph, self.player.yaw_pitch(), ctx.dt);
         if let Some(lantern) = &mut self.lantern {
             lantern.update(scene, self.player.camera(), self.player.yaw_pitch(), ctx.dt);
