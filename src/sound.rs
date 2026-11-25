@@ -1,5 +1,6 @@
 //! The forest's sounds, from plant_life's Birch Glade (`environments/birch-glade/audio`): the
-//! player's footsteps on the forest floor; the running water, heard from where it runs; and the
+//! player's footsteps, on the forest floor or wading in the water (recorded in shallow water: see
+//! `data/audio/water-footsteps-sources.md`); the running water, heard from where it runs; and the
 //! wind in the trees, all round, louder as it blows harder.
 //!
 //! The running water is the glade's loop mixed down to mono, so that the engine can place it:
@@ -32,6 +33,16 @@ const FOOTSTEPS: [&str; 6] = [
     "data/audio/footstep-forest-floor-05.ogg",
     "data/audio/footstep-forest-floor-06.ogg",
 ];
+const WADING: [&str; 8] = [
+    "data/audio/footstep-shallow-water-01.ogg",
+    "data/audio/footstep-shallow-water-02.ogg",
+    "data/audio/footstep-shallow-water-03.ogg",
+    "data/audio/footstep-shallow-water-04.ogg",
+    "data/audio/footstep-shallow-water-05.ogg",
+    "data/audio/footstep-shallow-water-06.ogg",
+    "data/audio/footstep-shallow-water-07.ogg",
+    "data/audio/footstep-shallow-water-08.ogg",
+];
 const STREAM: &str = "data/audio/stream-shallow-current-loop-mono.ogg";
 /// How long the running water's loop is, in seconds: each source starts somewhere else in it,
 /// so that they do not sound as one.
@@ -61,7 +72,9 @@ const FOLLOW: f32 = 2.0;
 
 #[derive(Debug, Default, PartialEq)]
 pub struct Sounds {
+    /// The footsteps on the forest floor, and wading.
     footsteps: Vec<SoundBufferResource>,
+    wading: Vec<SoundBufferResource>,
     /// The running water's sources: three to a channel.
     water: Vec<Handle<Sound>>,
     wind: Handle<Sound>,
@@ -80,6 +93,7 @@ impl Sounds {
         let listener = ListenerBuilder::new(BaseBuilder::new().with_name("Listener")).build(&mut scene.graph);
         scene.graph.link_nodes(listener, camera);
         let footsteps = FOOTSTEPS.iter().map(|path| resources.request::<SoundBuffer>(*path)).collect();
+        let wading = WADING.iter().map(|path| resources.request::<SoundBuffer>(*path)).collect();
         let stream = resources.request::<SoundBuffer>(STREAM);
         let water = (0..terrain.channels.len() * 3)
             .map(|k| {
@@ -104,7 +118,7 @@ impl Sounds {
             .with_spatial_blend_factor(0.0)
             .with_status(Status::Playing)
             .build(&mut scene.graph);
-        Self { footsteps, water, wind, walked: 0.0, last: usize::MAX, airborne: false, random: Random(seed ^ 0x50_0d5) }
+        Self { footsteps, wading, water, wind, walked: 0.0, last: usize::MAX, airborne: false, random: Random(seed ^ 0x50_0d5) }
     }
 
     /// Moves the sounds on by `dt` seconds: the player's feet at `feet`, moving at `velocity`,
@@ -126,14 +140,14 @@ impl Sounds {
             ease(sound, WIND_GAIN.0 + (WIND_GAIN.1 - WIND_GAIN.0) * wind.clamp(0.0, 1.0));
         }
 
-        // A step each stride along the ground, and one on landing; none in the water, where
-        // the forest floor's would be wrong.
+        // A step each stride along the ground, and one on landing: wading, in the water.
         let speed = velocity.xz().norm();
         let landed = grounded && self.airborne;
         self.airborne = !grounded;
-        if !grounded || terrain.wet(feet.x, feet.z, 0.0) {
+        if !grounded {
             return;
         }
+        let wet = terrain.wet(feet.x, feet.z, 0.0);
         if speed < STILL && !landed {
             // Starting off, the first step comes soon.
             self.walked = self.walked.max(0.6 * stride(WALKING));
@@ -143,21 +157,25 @@ impl Sounds {
         if self.walked >= stride(speed) || landed {
             self.walked = 0.0;
             let running = ((speed - WALKING) / (RUNNING - WALKING)).clamp(0.0, 1.0);
-            self.step(scene, STEP_GAIN.0 + (STEP_GAIN.1 - STEP_GAIN.0) * running);
+            self.step(scene, STEP_GAIN.0 + (STEP_GAIN.1 - STEP_GAIN.0) * running, wet);
         }
     }
 
-    /// One footstep, at `gain`: one of the six, never the last one again, a little higher or
-    /// lower each time.
-    fn step(&mut self, scene: &mut Scene, gain: f32) {
-        let loaded: Vec<usize> = (0..self.footsteps.len()).filter(|&i| self.footsteps[i].is_ok() && i != self.last).collect();
+    /// One footstep, at `gain`, on the forest floor or `wading`: one of that set, never the last
+    /// one again, a little higher or lower each time.
+    fn step(&mut self, scene: &mut Scene, gain: f32, wading: bool) {
+        let set = if wading { &self.wading } else { &self.footsteps };
+        // (The two sets counted as one, so that the last is never played again.)
+        let base = if wading { self.footsteps.len() } else { 0 };
+        let loaded: Vec<usize> = (0..set.len()).filter(|&i| set[i].is_ok() && base + i != self.last).collect();
         if loaded.is_empty() {
             return;
         }
         let pick = loaded[(self.random.unit() * loaded.len() as f32) as usize % loaded.len()];
-        self.last = pick;
+        self.last = base + pick;
+        let buffer = set[pick].clone();
         SoundBuilder::new(BaseBuilder::new().with_name("Footstep"))
-            .with_buffer(Some(self.footsteps[pick].clone()))
+            .with_buffer(Some(buffer))
             .with_play_once(true)
             .with_gain(gain * self.random.between(0.85, 1.0))
             .with_pitch(self.random.between(0.94, 1.06) as f64)
