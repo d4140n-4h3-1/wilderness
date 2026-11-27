@@ -97,6 +97,11 @@ pub struct Wilderness {
     #[visit(skip)]
     #[reflect(hidden)]
     scene: Handle<Scene>,
+    /// The field the engine's grass grows on: given its map once the forest is planted, and the
+    /// wind every frame.
+    #[visit(skip)]
+    #[reflect(hidden)]
+    grass: Option<fyrox_gfx::GrassField>,
     /// The models of the [`SPECIES`], in that order, then of the floor's [`floor::kinds`], then
     /// the [`LOAM`], loading until the forest is planted.
     #[visit(skip)]
@@ -166,6 +171,14 @@ pub struct Wilderness {
     #[visit(skip)]
     #[reflect(hidden)]
     shown_status: String,
+}
+
+impl Wilderness {
+    /// The game, its grass growing on `grass` (see [`crate::grass`]).
+    pub fn with_grass(mut self, grass: fyrox_gfx::GrassField) -> Self {
+        self.grass = Some(grass);
+        self
+    }
 }
 
 impl Wilderness {
@@ -379,6 +392,9 @@ impl Wilderness {
             floor.retain(|_| false);
         }
         floor.build_rocks(&mut scene.graph);
+        if let (Some(grass), true) = (&self.grass, crate::grass_grows()) {
+            grass.set_map(crate::grass::map(seed, terrain, &trees));
+        }
         let standing = self.water.set_standing(&floor.rock_bounds());
         Log::info(format!("Water: ripples round {standing} rocks standing in it"));
         let wind_now = Wind::new(seed);
@@ -579,6 +595,13 @@ impl Plugin for Wilderness {
         let started = std::time::Instant::now();
         if let Some(wind) = &mut self.wind {
             wind.update(ctx.dt);
+            // The grass, bent by the wind where the player stands: its gusts run over the field
+            // in the shader.
+            if let Some(grass) = &self.grass {
+                let at = self.player.feet(&scene.graph);
+                let push = wind.at(at.x, at.z);
+                grass.set_wind([push.x, push.y], push.norm() / 1.5, 1.6);
+            }
             // Far off, a tree's sway is too small to see: faded out, and then left still, which
             // costs nothing to draw.
             let player = self.player.feet(&scene.graph).xz();
