@@ -5,6 +5,7 @@ use crate::{
     day::Day,
     litter::Litter,
     seasons::Seasons,
+    weather::Weather,
     floor::{self, Floor},
     flashlight::Flashlight,
     lantern::Lantern,
@@ -57,11 +58,13 @@ use fyrox::{
 };
 use fyrox::{graph::SceneGraph, material::MaterialResourceExtension};
 
-/// Which forest grows, unless WILDERNESS_SEED says otherwise: the start at the edge of a glade, a
-/// pond 18 m off and another within 80 m, the river and a stream 13 m off with their bank grasses,
-/// birches, oaks and a rowan close by to turn with the seasons, alders and a willow along the
-/// water. (Seed 18's sunny glade, and seed 6's river valley, are still there with WILDERNESS_SEED.)
-pub const SEED: u64 = 28;
+/// Which forest grows, unless WILDERNESS_SEED says otherwise: the start in the open, under the sky
+/// to see the rain and snow come down, a few trees round it; the river and a stream 12 m off, with
+/// their bank grasses, and a pond 18 m; eleven birches, oaks and rowans within 30 m to turn with
+/// the seasons, eight alders and willows along the water within 60 m; and most of the dry ground
+/// near gentle enough for the snow to lie. (Seed 28's, 18's and 6's forests are still there with
+/// WILDERNESS_SEED.)
+pub const SEED: u64 = 67;
 /// Light from the sky on the side of things the sun is not on.
 const AMBIENT: Color = Color::opaque(128, 136, 146);
 /// The sun: warm, in the afternoon.
@@ -93,7 +96,7 @@ pub const BORDER: f32 = 12.0;
 /// at all, between, less and less.
 const TREES_SWAY: (f32, f32) = (60.0, 85.0);
 /// What the help line says once the forest has grown.
-const HELP: &str = "WASD walk  ·  Shift run  ·  Space jump  ·  F flashlight  ·  L lantern  ·  Click to look around  ·  Esc free the mouse";
+const HELP: &str = "WASD walk  ·  Shift run  ·  Space jump  ·  F flashlight  ·  L lantern  ·  R weather  ·  Click to look around  ·  Esc free the mouse";
 
 #[derive(Default, Debug, PartialEq, Visit, Reflect)]
 #[reflect(non_cloneable, type_uuid = "6f1c2b7e-4a5d-4e8b-9c3a-1d2e7f80a915")]
@@ -157,6 +160,10 @@ pub struct Wilderness {
     #[visit(skip)]
     #[reflect(hidden)]
     seasons: Option<Seasons>,
+    /// Clear, rain or snow (see `weather.rs`).
+    #[visit(skip)]
+    #[reflect(hidden)]
+    weather: Option<Weather>,
     /// The leaves fallen round the broad-leaved trees (see `litter.rs`), once planted.
     #[visit(skip)]
     #[reflect(hidden)]
@@ -266,6 +273,7 @@ impl Wilderness {
         if self.day.is_some() {
             self.sky = Sky::build(&mut scene, self.player.camera());
         }
+        self.weather = Some(Weather::build(&mut scene, self.player.camera(), crate::weather::Kind::from_env()));
         // WILDERNESS_VIEW=<yaw>,<pitch> starts the view turned so, in degrees (pitch down), for
         // screenshots taken the same way each time.
         if let Some((yaw, pitch)) = std::env::var("WILDERNESS_VIEW").ok().and_then(|view| {
@@ -324,13 +332,37 @@ impl Wilderness {
         }
     }
 
-    /// Moves the sun on, and lights the scene for the time of day, while days go by.
+    /// The light now, under the weather: none while the clock is stopped.
+    fn lighting(&self) -> Option<crate::day::Lighting> {
+        let mut lit = self.day.as_ref()?.lighting();
+        self.weather_now().overcast().apply(&mut lit);
+        Some(lit)
+    }
+
+    fn weather_now(&self) -> crate::weather::Kind {
+        self.weather.as_ref().map_or_else(crate::weather::Kind::default, Weather::kind)
+    }
+
+    /// Moves the sun on, and lights the scene for the time of day, while days go by; and under the
+    /// weather.
     fn pass_time(&mut self, ctx: &mut PluginContext) {
+        let overcast = self.weather_now().overcast();
+        if let Some(fog) = &mut ctx.scenes[self.scene].rendering_options.fog {
+            overcast.haze(fog, &HAZE);
+        }
         let Some(day) = &mut self.day else {
+            // The afternoon staying: its light as it was built, under the weather.
+            let scene = &mut ctx.scenes[self.scene];
+            scene.rendering_options.ambient_lighting_color = crate::weather::tinted(AMBIENT, [overcast.ambient; 3]);
+            let light = scene.graph[self.sun].base_light_mut();
+            light.set_color(crate::weather::tinted(SUN, overcast.sun_tint));
+            light.set_intensity(overcast.sun);
             return;
         };
         day.advance(ctx.dt);
-        let lit = day.lighting();
+        let Some(lit) = self.lighting() else {
+            return;
+        };
         let scene = &mut ctx.scenes[self.scene];
         scene.rendering_options.ambient_lighting_color = lit.ambient;
         scene.rendering_options.clear_color = Some(lit.sky);
@@ -417,7 +449,14 @@ impl Wilderness {
         let player = self.player.feet(&scene.graph);
         floor.update(scene, &mut self.prepared, player, &wind_now, 0.0, true);
         if let Some(loam) = self.models.last().filter(|m| m.is_ok()) {
-            lay_loam(scene, loam, &self.ground);
+            if let (Some(loam), Some(weather)) = (lay_loam(scene, loam, &self.ground), &mut self.weather) {
+                weather.set_loam(loam);
+            }
+            // The snow laid now, if it is snowing from the start.
+            if let (Some(weather), Some(terrain)) = (&mut self.weather, &self.terrain) {
+                let kind = weather.kind();
+                weather.set(&mut scene.graph, kind, Some(terrain));
+            }
         }
         Log::info(format!(
             "Planted {} trees and {} plants and rocks from seed {seed} in {:.1} s; wind {}",
@@ -495,7 +534,7 @@ fn wind_blows() -> bool {
 
 /// Lays the loam over the `ground`'s squares: the material of its one-meter tile, whose texture
 /// the squares repeat a meter apart.
-fn lay_loam(scene: &mut Scene, loam: &ModelResource, ground: &[Handle<Node>]) {
+fn lay_loam(scene: &mut Scene, loam: &ModelResource, ground: &[Handle<Node>]) -> Option<MaterialResource> {
     let root = loam.instantiate(scene);
     let graph = &mut scene.graph;
     let material = graph
@@ -504,7 +543,7 @@ fn lay_loam(scene: &mut Scene, loam: &ModelResource, ground: &[Handle<Node>]) {
     graph.remove_node(root);
     let Some(material) = material else {
         Log::warn(format!("{LOAM} has no surface; the ground stays bare"));
-        return;
+        return None;
     };
     material.data_ref().set_property("texCoordScale", Vector2::new(1.0, 1.0));
     for &square in ground {
@@ -514,6 +553,7 @@ fn lay_loam(scene: &mut Scene, loam: &ModelResource, ground: &[Handle<Node>]) {
             }
         }
     }
+    Some(material)
 }
 
 /// Which forest grows: WILDERNESS_SEED, or [`SEED`].
@@ -622,7 +662,7 @@ impl Plugin for Wilderness {
         let feet = self.player.feet(&scene.graph);
         let wading = (feet - Vector3::new(0.3, 0.0, 0.3), feet + Vector3::new(0.3, 1.8, 0.3));
         let eye = scene.graph[self.player.camera()].global_position();
-        let lit = self.day.as_ref().map(|day| day.lighting());
+        let lit = self.lighting();
         let lights = crate::water::Lights {
             toward_sun,
             sky: lit.as_ref().map(|lit| (lit.zenith, lit.haze)),
@@ -632,6 +672,12 @@ impl Plugin for Wilderness {
             lamps: crate::water::lamps_near(&scene.graph, eye),
         };
         self.water.update(scene, &lights, eye, wading, ctx.dt);
+        // The rain or snow, blown by the wind where the player stands, lit by the sky.
+        if let Some(weather) = &mut self.weather {
+            let push = self.wind.as_ref().map_or(Vector2::zeros(), |wind| wind.at(eye.x, eye.z));
+            let sky = lit.as_ref().map_or_else(|| crate::weather::greyed(HAZE.color, weather.kind().overcast().grey), |lit| lit.haze);
+            weather.update(push, sky, ctx.dt);
+        }
         if let Some(terrain) = &self.terrain {
             let velocity = self.player.velocity(&scene.graph);
             let grounded = self.player.grounded(&scene.graph);
@@ -725,6 +771,11 @@ impl Plugin for Wilderness {
                     let down = *state == ElementState::Pressed;
                     if *key == KeyCode::Escape && down {
                         self.set_mouse_captured(&mut ctx, false);
+                    } else if *key == KeyCode::KeyR && down {
+                        if let Some(weather) = &mut self.weather {
+                            let next = weather.kind().next();
+                            weather.set(&mut ctx.scenes[self.scene].graph, next, self.terrain.as_ref());
+                        }
                     } else if matches!(key, KeyCode::KeyF | KeyCode::KeyL) && down {
                         self.light_the_way(&mut ctx.scenes[self.scene].graph, *key == KeyCode::KeyF);
                     } else if let (

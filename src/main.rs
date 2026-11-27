@@ -35,6 +35,7 @@ mod sky;
 mod sound;
 mod terrain;
 mod water;
+mod weather;
 mod wind;
 
 use fyrox::{
