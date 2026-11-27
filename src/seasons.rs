@@ -16,18 +16,32 @@
 //! from the original's texels, once a day of the calendar for each material whose look changes, a
 //! material each frame so no frame does them all; a new texture, not the old one changed, so that
 //! the traced shadows, which keep what each texture lets through, see the leaves gone too.
+//!
+//! Flowers and fruit out of season are not drawn at all: each of their surfaces, in every planted
+//! copy, is swapped for a stand-in of one empty triangle, and back when they bloom again - so
+//! nothing of them is drawn, casts a shadow or is lit, as if they were not planted. A copy
+//! planted later, as the floor fills in round the player, is seen to by [`Seasons::despawn_in`].
 
 use crate::random::{smoothstep, Random};
 use fyrox::{
     asset::{untyped::ResourceKind, Resource},
-    core::{color::Color, log::Log, uuid::Uuid},
+    core::{log::Log, math::TriangleDefinition, pool::Handle, uuid::Uuid},
     fxhash::FxHashMap,
-    material::{MaterialProperty, MaterialResource},
+    graph::SceneGraph,
+    material::MaterialResource,
     resource::{
         model::ModelResource,
         texture::{Texture, TextureKind, TexturePixelKind, TextureResource},
     },
-    scene::mesh::Mesh,
+    scene::{
+        graph::Graph,
+        mesh::{
+            buffer::TriangleBuffer,
+            surface::{SurfaceBuilder, SurfaceResource},
+            Mesh,
+        },
+        node::Node,
+    },
 };
 
 const PALETTE: &str = include_str!("../data/seasonal-foliage.json");
@@ -231,10 +245,11 @@ struct Seasonal {
     height: usize,
     /// Bytes a texel: 4, or 3 for a texture without alpha.
     stride: usize,
-    /// Its own colour, by which the texture is multiplied: its alpha hides the flowers out of
-    /// their season, a texture of an opaque material having none of its own.
-    color: Color,
     kind: Kind,
+    /// Flowers' surfaces, each with the stand-in that takes its place out of season.
+    stand_ins: Vec<(SurfaceResource, SurfaceResource)>,
+    /// Whether flowers are out: as the surfaces in the scene are now.
+    out: bool,
     /// What its texture was last made for, so it is made again only when that changes.
     made: Option<u64>,
 }
@@ -313,7 +328,9 @@ impl Seasons {
                     continue;
                 }
                 let material = surface.material().clone();
-                if materials.iter().any(|m| m.material.key() == material.key()) {
+                let stand_in = flowers.map(|_| (surface.data(), stand_in(&surface.data())));
+                if let Some(seasonal) = materials.iter_mut().find(|m| m.material.key() == material.key()) {
+                    seasonal.stand_ins.extend(stand_in);
                     continue;
                 }
                 let Some(original) = diffuse_texels(&material) else {
@@ -328,10 +345,6 @@ impl Seasons {
                 if fall.is_some() && stride != 4 {
                     Log::warn(format!("Seasons: the leaves of {name} in {path} have no alpha to fall by; they only turn"));
                 }
-                let color = match material.data_ref().property_group_ref("properties").and_then(|g| g.property_ref("diffuseColor")) {
-                    Some(MaterialProperty::Color(color)) => *color,
-                    _ => Color::WHITE,
-                };
                 let kind = if let (Some((fall, peak)), 4) = (fall, stride) {
                     let (cells, numbers) = leaf_cells(&original, width, height, name);
                     Kind::Crown { fall, peak, cells, numbers }
@@ -340,7 +353,18 @@ impl Seasons {
                 } else {
                     Kind::Tinted
                 };
-                materials.push(Seasonal { name: name.clone(), material, original, width, height, stride, color, kind, made: None });
+                materials.push(Seasonal {
+                    name: name.clone(),
+                    material,
+                    original,
+                    width,
+                    height,
+                    stride,
+                    kind,
+                    stand_ins: stand_in.into_iter().collect(),
+                    out: true,
+                    made: None,
+                });
             }
         }
         Log::info(format!(
@@ -352,9 +376,11 @@ impl Seasons {
     }
 
     /// Draws the seasons for `day` into the next material whose look has changed since it was last
-    /// drawn, if any; with `all`, into every one. Returns how many were drawn.
-    pub fn update(&mut self, day: f32, all: bool) -> usize {
+    /// drawn, if any; with `all`, into every one. Flowers coming out or over are swapped in or
+    /// out of `graph`. Returns how many were drawn.
+    pub fn update(&mut self, graph: &mut Graph, day: f32, all: bool) -> usize {
         let mut drawn = 0;
+        let mut swaps: FxHashMap<u64, SurfaceResource> = FxHashMap::default();
         for _ in 0..self.materials.len() {
             let index = self.next;
             self.next = (self.next + 1) % self.materials.len().max(1);
@@ -366,12 +392,76 @@ impl Seasons {
             }
             seasonal.made = Some(state);
             seasonal.draw(&self.palette, day.floor());
+            if let Kind::Flowers(from, to) = seasonal.kind {
+                let out = in_bloom(&self.palette, from, to, day.floor());
+                if out != seasonal.out {
+                    seasonal.out = out;
+                    for (original, stand_in) in &seasonal.stand_ins {
+                        let (gone, coming) = if out { (stand_in, original) } else { (original, stand_in) };
+                        swaps.insert(gone.key(), coming.clone());
+                    }
+                }
+            }
             drawn += 1;
             if !all {
                 break;
             }
         }
+        if !swaps.is_empty() {
+            swap(graph, graph.root(), &swaps);
+        }
         drawn
+    }
+
+    /// Takes the flowers out of season out of a copy just planted under `root`.
+    pub fn despawn_in(&self, graph: &mut Graph, root: Handle<Node>) {
+        let swaps: FxHashMap<u64, SurfaceResource> = self
+            .materials
+            .iter()
+            .filter(|m| !m.out)
+            .flat_map(|m| &m.stand_ins)
+            .map(|(original, stand_in)| (original.key(), stand_in.clone()))
+            .collect();
+        if !swaps.is_empty() {
+            swap(graph, root, &swaps);
+        }
+    }
+
+    /// How many flowers' materials are out of season, their surfaces swapped out.
+    pub fn despawned(&self) -> usize {
+        self.materials.iter().filter(|m| !m.out).count()
+    }
+}
+
+/// Whether flowers blooming from day `from` to `to` are out on `day`.
+fn in_bloom(palette: &Palette, from: f32, to: f32, day: f32) -> bool {
+    let day = (day - 1.0).rem_euclid(palette.days_per_year) + 1.0;
+    (from..=to).contains(&day)
+}
+
+/// A stand-in for `original`: its vertices but a single triangle with no area, drawing nothing
+/// and casting no shadow; without the wind's shapes, so nothing bends it.
+fn stand_in(original: &SurfaceResource) -> SurfaceResource {
+    let mut data = original.data_ref().clone();
+    data.geometry_buffer = TriangleBuffer::new(vec![TriangleDefinition([0, 0, 0])]);
+    data.blend_shapes_container = None;
+    SurfaceResource::new_embedded(data)
+}
+
+/// Every surface under `root` whose data is a key of `swaps` given that one's data instead, its
+/// material kept. A new surface, not its data changed, so the renderer and the traced shadows,
+/// which keep geometry by the data's key, take it afresh.
+fn swap(graph: &mut Graph, root: Handle<Node>, swaps: &FxHashMap<u64, SurfaceResource>) {
+    let meshes: Vec<Handle<Node>> = graph.traverse_handle_iter(root).filter(|&h| graph[h].cast::<Mesh>().is_some()).collect();
+    for handle in meshes {
+        let Some(mesh) = graph[handle].cast_mut::<Mesh>() else {
+            continue;
+        };
+        for surface in mesh.surfaces_mut() {
+            if let Some(data) = swaps.get(&surface.data_ref().key()) {
+                *surface = SurfaceBuilder::new(data.clone()).with_material(surface.material().clone()).build();
+            }
+        }
     }
 }
 
@@ -404,7 +494,6 @@ impl Seasonal {
     fn draw(&self, palette: &Palette, day: f32) {
         let mut texture = self.original.clone();
         let (width, height, stride) = (self.width, self.height, self.stride);
-        let mut shown = true;
         let linear = srgb_to_linear_table();
         let tint_texel = |texel: &mut [u8], tint: [f32; 3]| {
             if tint == [1.0; 3] {
@@ -433,13 +522,14 @@ impl Seasonal {
                     }
                 }
                 Kind::Flowers(from, to) => {
+                    // Out of season they are not drawn at all (see `Seasons::update`).
+                    if !in_bloom(palette, *from, *to, day) {
+                        return;
+                    }
                     let day = (day - 1.0).rem_euclid(palette.days_per_year) + 1.0;
-                    shown = (*from..=*to).contains(&day);
                     let tint = palette.tint(&self.name, day);
-                    if shown {
-                        for texel in base.chunks_exact_mut(stride) {
-                            tint_texel(texel, tint);
-                        }
+                    for texel in base.chunks_exact_mut(stride) {
+                        tint_texel(texel, tint);
                     }
                 }
                 Kind::Tinted => {
@@ -491,8 +581,6 @@ impl Seasonal {
         let texture = Resource::new_ok(Uuid::new_v4(), ResourceKind::Embedded, texture);
         let mut material = self.material.data_ref();
         material.bind("diffuseTexture", Some(texture));
-        let color = Color::from_rgba(self.color.r, self.color.g, self.color.b, if shown { self.color.a } else { 0 });
-        material.set_property("diffuseColor", color);
     }
 }
 
@@ -650,6 +738,28 @@ mod tests {
             let (turn, falls) = crown_timing(fall[2], fall[3], cell[0], cell[1], cell[2]);
             assert!(falls >= turn + 8.0);
         }
+    }
+
+    #[test]
+    fn flowers_out_of_season_are_swapped_out_and_back() {
+        use fyrox::scene::{base::BaseBuilder, mesh::MeshBuilder, mesh::surface::SurfaceData};
+        let mut graph = Graph::new();
+        let original = SurfaceResource::new_embedded(SurfaceData::make_quad(&fyrox::core::algebra::Matrix4::identity()));
+        let other = SurfaceResource::new_embedded(SurfaceData::make_quad(&fyrox::core::algebra::Matrix4::identity()));
+        let mesh: Handle<Node> = MeshBuilder::new(BaseBuilder::new())
+            .with_surfaces(vec![SurfaceBuilder::new(other.clone()).build(), SurfaceBuilder::new(original.clone()).build()])
+            .build(&mut graph)
+            .to_base();
+        let root = graph.root();
+        let empty = stand_in(&original);
+        assert_eq!(empty.data_ref().geometry_buffer.len(), 1);
+        let keys = |graph: &Graph| graph[mesh].cast::<Mesh>().unwrap().surfaces().iter().map(|s: &fyrox::scene::mesh::surface::Surface| s.data_ref().key()).collect::<Vec<_>>();
+        swap(&mut graph, root, &FxHashMap::from_iter([(original.key(), empty.clone())]));
+        assert_eq!(keys(&graph), vec![other.key(), empty.key()]);
+        swap(&mut graph, root, &FxHashMap::from_iter([(empty.key(), original.clone())]));
+        assert_eq!(keys(&graph), vec![other.key(), original.key()]);
+        let palette = Palette::load();
+        assert!(in_bloom(&palette, 120.0, 175.0, 150.0) && !in_bloom(&palette, 120.0, 175.0, 300.0));
     }
 
     #[test]

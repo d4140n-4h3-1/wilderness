@@ -467,7 +467,8 @@ impl Floor {
     }
 
     /// Puts the plants near enough `player` into the scene and takes far ones out (at most a
-    /// few hundred a frame, unless `all`), and sways those in it.
+    /// few hundred a frame, unless `all`), and sways those in it. Returns the roots of those put
+    /// in.
     pub fn update(
         &mut self,
         scene: &mut Scene,
@@ -476,7 +477,7 @@ impl Floor {
         wind: &Wind,
         dt: f32,
         all: bool,
-    ) {
+    ) -> Vec<Handle<Node>> {
         let distance = |chunk: &Chunk| {
             let d = (chunk.middle - player.xz()).abs() - Vector2::repeat(CHUNK / 2.0);
             d.sup(&Vector2::zeros()).norm()
@@ -492,6 +493,7 @@ impl Floor {
             }
         }
         wanted.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut planted = Vec::new();
         let mut budget = if all { usize::MAX } else { SPAWNS_PER_FRAME };
         for (_, index, band) in wanted {
             let count = self.chunks[index].bands[band].len();
@@ -500,6 +502,7 @@ impl Floor {
             }
             budget -= count;
             let spawned = self.spawn(scene, prepared, index, band);
+            planted.push(spawned.root);
             self.chunks[index].spawned[band] = Some(spawned);
         }
 
@@ -522,6 +525,7 @@ impl Floor {
                 }
             }
         }
+        planted
     }
 
     /// How many plants and rocks are in the scene.

@@ -432,10 +432,11 @@ impl Wilderness {
         let started = std::time::Instant::now();
         let models: Vec<(&str, &ModelResource)> = model_paths().zip(&self.models).collect();
         let mut seasons = Seasons::new(&models);
-        let drawn = seasons.update(self.day_of_year(), true);
+        let drawn = seasons.update(&mut ctx.scenes[self.scene].graph, self.day_of_year(), true);
         Log::info(format!(
-            "Seasons: {drawn} materials drawn for {} in {:.2} s",
+            "Seasons: {drawn} materials drawn for {}, {} flowers out of season taken out, in {:.2} s",
             crate::day::date_text(self.date()),
+            seasons.despawned(),
             started.elapsed().as_secs_f32()
         ));
         self.seasons = Some(seasons);
@@ -605,7 +606,7 @@ impl Plugin for Wilderness {
         // The plants following the calendar: a material a frame, when a day has gone by.
         let day = self.day_of_year();
         if let Some(seasons) = &mut self.seasons {
-            seasons.update(day, false);
+            seasons.update(&mut ctx.scenes[self.scene].graph, day, false);
         }
         if let Some(litter) = &mut self.litter {
             litter.update(&mut ctx.scenes[self.scene].graph, day);
@@ -661,7 +662,13 @@ impl Plugin for Wilderness {
             }
             if let Some(floor) = &mut self.floor {
                 let player = self.player.feet(&scene.graph);
-                floor.update(scene, &mut self.prepared, player, wind, ctx.dt, false);
+                let planted = floor.update(scene, &mut self.prepared, player, wind, ctx.dt, false);
+                // Flowers out of season are not planted with them.
+                if let Some(seasons) = &self.seasons {
+                    for root in planted {
+                        seasons.despawn_in(&mut scene.graph, root);
+                    }
+                }
             }
         }
         if let Some(wind) = &self.wind {
