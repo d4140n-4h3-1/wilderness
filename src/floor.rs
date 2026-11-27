@@ -12,12 +12,14 @@
 //! The models are detailed, thousands of triangles to a tuft, so this keeps the floor's share of
 //! the frame small. Plants too low to cast a shadow worth tracing cast none.
 //!
-//! Over the soil between, a carpet of low growth - grasses, sorrel, heather and ferns, [`COVER`] -
+//! Over the soil between, a carpet of low growth - plant_life's woodland grass cards mostly, and
+//! among them grasses, sorrel, heather and ferns, [`COVER`] -
 //! grows thicker still, but only near the player: each tuft shows within
 //! 4.5, 7 or 10 m of them ([`COVER_BANDS`]), more of them the nearer, so the carpet is whole
 //! underfoot and thins out to the floor's own plants a few steps off, rather than ending at a line.
-//! It casts no shadow, and stands still in the wind (see [`COVER_SWAYS`]): a carpet's shadows
-//! hardly show, and tracing them, and bending thousands of tufts every frame, cost the most of it.
+//! It casts no shadow: a carpet's shadows hardly show, and tracing them cost the most of it. The
+//! grass cards sway in the wind, their clumps bent whole; the heavier tufts among them stand still
+//! (see [`COVER_SWAYS`]), bending thousands of triangles of each every frame too dear.
 
 use crate::{
     forest::{self, Thicket, Tree},
@@ -91,7 +93,7 @@ const fn plant(
 }
 
 /// Every plant of the forest floor.
-pub const PLANTS: [Kind; 17] = [
+pub const PLANTS: [Kind; 20] = [
     plant("Bilberry", "data/plants/bilberry.glb", wind::SHRUB, 0.67, (1.0, 5.0), 10.0, (0.7, 1.3), 0.38),
     plant("Common heather", "data/plants/common-heather.glb", wind::SHRUB, 0.6, (3.0, 0.3), 12.0, (0.7, 1.3), 0.5),
     plant("Common broom", "data/plants/common-broom.glb", wind::SHRUB, 1.9, (0.8, 0.05), 18.0, (0.7, 1.2), 1.1),
@@ -109,6 +111,11 @@ pub const PLANTS: [Kind; 17] = [
     plant("Oxeye daisy", "data/plants/oxeye-daisy.glb", wind::WILDFLOWER, 0.55, (2.0, 0.1), 9.0, (0.9, 1.2), 0.22),
     plant("English bluebell", "data/plants/english-bluebell.glb", wind::WILDFLOWER, 0.41, (0.6, 2.0), 8.0, (0.9, 1.3), 0.3),
     plant("Common poppy", "data/plants/common-poppy.glb", wind::WILDFLOWER, 0.68, (1.0, 0.0), 10.0, (0.9, 1.2), 0.3),
+    // plant_life's woodland grass cards: clumps of three crossed cards, six triangles each, for
+    // covering bare soil. They grow in the ground cover alone (see [`COVER`]), so none here.
+    plant("Woodland grass carpet", "data/plants/woodland-grass-carpet.glb", wind::GRASS, 0.20, (0.0, 0.0), 6.0, (0.8, 1.25), 0.32),
+    plant("Woodland grass fescue", "data/plants/woodland-grass-fescue.glb", wind::GRASS, 0.29, (0.0, 0.0), 5.0, (0.8, 1.2), 0.26),
+    plant("Woodland grass bank", "data/plants/woodland-grass-bank.glb", wind::GRASS, 0.38, (0.0, 0.0), 7.0, (0.8, 1.2), 0.36),
 ];
 
 /// A kind of rock, and the box the player bumps into, if any: its half extents at the model's
@@ -176,29 +183,52 @@ const NEAREST_PLANTS: f32 = 12.0;
 /// each: the most underfoot, fewer further off.
 const COVER_BANDS: usize = 3;
 const COVER_SHARES: [f32; COVER_BANDS] = [0.5, 0.3, 0.2];
-/// How many of the cover's bands, nearest first, sway in the wind; the rest stand still. None:
+/// How many of the cover's bands, nearest first, its kinds that do not sway everywhere (see
+/// [`Cover::sways`]) sway in; past them they stand still. None:
 /// a tuft swaying is bent anew every frame, for Yoctite to draw and for Candelite's rays and the
 /// shadows' to trace - swaying in the nearest band alone took the frame from about 11 ms of the
 /// GPU's to 14, all of it to 17 (30 FPS). Standing still, the carpet costs under a millisecond,
 /// and the floor's own plants in it - bracken, bilberry, bluebells - still sway.
 const COVER_SWAYS: usize = 0;
-/// The ground cover's kinds: low, as thick as a carpet, and light - a few thousand triangles a
-/// tuft at most, drawn whole so near. Bilberry (7,600) and bluebells (5,000) stay the floor's
-/// own: in the carpet they took the frame past 60 FPS's. Each grows where it would (see
-/// [`Kind::open`]), and it keeps clear of trunks, rocks and the water as the rest of the floor.
-const COVER: [&str; 6] = [
-    "Sheep fescue",
-    "Tufted hairgrass",
-    "Wood melick",
-    "Wood sorrel",
-    "Common heather",
-    "Hard fern",
+/// A kind of the ground cover: how common it is in the open, in deep shade and on the damp ground
+/// by the water, against the others; its size, as a share of its kind's; and whether it sways in
+/// the wind wherever it shows.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Cover {
+    name: &'static str,
+    open: f32,
+    shade: f32,
+    damp: f32,
+    scale: f32,
+    sways: bool,
+}
+
+/// The ground cover's kinds: low, as thick as a carpet, and light. Mostly plant_life's woodland
+/// grass cards - six triangles a clump, the carpet the most of them, fine fescue through it, and
+/// the taller bank grass by the water, as their notes place them - and among them, fewer, the
+/// lightest of the floor's own plants, a few thousand triangles a tuft at most, drawn whole so
+/// near. Bilberry (7,600) and bluebells (5,000) stay the floor's own: in the carpet they took the
+/// frame past 60 FPS's. Each keeps clear of trunks, rocks and the water as the rest of the floor.
+const COVER: [Cover; 9] = [
+    Cover { name: "Woodland grass carpet", open: 6.0, shade: 3.0, damp: 0.0, scale: 1.0, sways: true },
+    Cover { name: "Woodland grass fescue", open: 3.0, shade: 1.2, damp: 0.0, scale: 1.0, sways: true },
+    Cover { name: "Woodland grass bank", open: 0.3, shade: 0.2, damp: 8.0, scale: 1.0, sways: true },
+    Cover { name: "Sheep fescue", open: 0.8, shade: 0.1, damp: 0.0, scale: 0.8, sways: false },
+    Cover { name: "Tufted hairgrass", open: 0.4, shade: 0.2, damp: 0.5, scale: 0.8, sways: false },
+    Cover { name: "Wood melick", open: 0.1, shade: 0.8, damp: 0.0, scale: 0.8, sways: false },
+    Cover { name: "Wood sorrel", open: 0.05, shade: 0.8, damp: 0.0, scale: 0.8, sways: false },
+    Cover { name: "Common heather", open: 0.6, shade: 0.05, damp: 0.0, scale: 0.8, sways: false },
+    Cover { name: "Hard fern", open: 0.05, shade: 0.6, damp: 0.4, scale: 0.8, sways: false },
 ];
-/// How many tufts of ground cover grow on a square meter at most; and how small they are, as a
-/// share of their kind's size: low, under the floor's own plants. Twice as thick took Yoctite's
-/// drawing from 2.5 ms to 5.4, the frame past 60 FPS's.
+/// How near the water, in meters, the ground counts as damp, for the bank grass.
+const DAMP: f32 = 2.5;
+/// How many tufts of ground cover grow on a square meter at most: of the floor's own plants, and of
+/// the grass cards (see [`Cover::sways`]), which grow apart, as thick as each can be. Of the floor's
+/// own plants, twice 2 took Yoctite's drawing from 2.5 ms to 5.4, the frame past 60 FPS's; the
+/// cards, six triangles a clump, grow as plant_life's notes have them, a third of a meter or so
+/// apart.
 const MOST_COVER: f32 = 2.0;
-const COVER_SCALE: f32 = 0.8;
+const MOST_CARDS: f32 = 8.0;
 /// How far from the water's edge plants keep, in meters; and the share of rocks that may lie in
 /// the water.
 const PLANTS_OFF_WATER: f32 = 0.1;
@@ -476,8 +506,10 @@ impl Floor {
                     graph[node].set_cast_shadows(false);
                 }
             }
-            // Of the ground cover, only the tufts in its first COVER_SWAYS bands sway.
-            let swaying = placement.cover.is_none_or(|band| band < COVER_SWAYS);
+            // Of the ground cover, the grass cards sway - six triangles a clump, bent cheaply -
+            // and the other tufts only in its first COVER_SWAYS bands.
+            let swaying = placement.cover.is_none_or(|band| band < COVER_SWAYS)
+                || COVER.iter().any(|cover| cover.sways && cover.name == kind.name);
             if let (true, Some(profile), true) = (self.wind, kind.wind, swaying) {
                 sways.extend(mesh_of(graph, root).and_then(|mesh| {
                     Sway::new(
@@ -645,7 +677,8 @@ fn lay_out(seed: u64, terrain: &Terrain, trees: &[Tree]) -> Vec<Chunk> {
     }
     // WILDERNESS_COVER=0 leaves the ground cover out.
     if std::env::var("WILDERNESS_COVER").as_deref() != Ok("0") {
-        ground_cover(seed, terrain, &thicket, &clumps, &patches, &obstacles, &mut chunks);
+        ground_cover(seed, terrain, &thicket, &clumps, &patches, &obstacles, &mut chunks, false);
+        ground_cover(seed, terrain, &thicket, &clumps, &patches, &obstacles, &mut chunks, true);
     }
     for chunk in &mut chunks {
         for placement in &chunk.placements {
@@ -666,15 +699,19 @@ fn ground_cover(
     patches: &[Noise],
     obstacles: &Obstacles,
     chunks: &mut [Chunk],
+    cards: bool,
 ) {
     let extent = extent();
-    let kinds: Vec<usize> = COVER
+    // The kinds of this layer - the grass cards, or the rest - and how thick it grows at most.
+    let covers: Vec<Cover> = COVER.iter().copied().filter(|cover| cover.sways == cards).collect();
+    let most = if cards { MOST_CARDS } else { MOST_COVER };
+    let kinds: Vec<usize> = covers
         .iter()
-        .map(|name| PLANTS.iter().position(|kind| kind.name == *name).expect("a floor plant"))
+        .map(|cover| PLANTS.iter().position(|kind| kind.name == cover.name).expect("a floor plant"))
         .collect();
     for (index, chunk) in chunks.iter_mut().enumerate() {
-        let mut random = Random::for_place(seed, index as i64, 3);
-        for _ in 0..(MOST_COVER * CHUNK * CHUNK).round() as usize {
+        let mut random = Random::for_place(seed, index as i64, if cards { 4 } else { 3 });
+        for _ in 0..(most * CHUNK * CHUNK).round() as usize {
             let at = chunk.middle + Vector2::new(random.between(-0.5, 0.5), random.between(-0.5, 0.5)) * CHUNK;
             if at.x.abs() >= extent || at.y.abs() >= extent || at.norm() < 1.0 || terrain.wet(at.x, at.y, PLANTS_OFF_WATER) {
                 continue;
@@ -686,11 +723,13 @@ fn ground_cover(
             if random.unit() > share {
                 continue;
             }
+            let damp = terrain.wet(at.x, at.y, DAMP);
             let weights: Vec<f32> = kinds
                 .iter()
-                .map(|&k| {
+                .zip(&covers)
+                .map(|(&k, cover)| {
                     let kind = &PLANTS[k];
-                    let habitat = kind.open + (kind.shade - kind.open) * thickness;
+                    let habitat = cover.open + (cover.shade - cover.open) * thickness + if damp { cover.damp } else { 0.0 };
                     habitat * (0.3 + smoothstep(0.4, 0.75, patches[k].at(at.x / kind.patch, at.y / kind.patch)))
                 })
                 .collect();
@@ -698,7 +737,7 @@ fn ground_cover(
                 continue;
             };
             let kind = &PLANTS[kinds[pick]];
-            let scale = COVER_SCALE * random.between(kind.scale.0, kind.scale.1);
+            let scale = covers[pick].scale * random.between(kind.scale.0, kind.scale.1);
             if obstacles.blocked(at, 0.3 * kind.radius * scale) {
                 continue;
             }
@@ -874,9 +913,9 @@ mod tests {
         let cover: Vec<&Placement> = chunks.iter().flat_map(|c| &c.placements).filter(|p| p.cover.is_some()).collect();
         let extent = extent();
         let density = cover.len() as f32 / ((2.0 * extent) * (2.0 * extent));
-        assert!((0.4..MOST_COVER).contains(&density), "{density} tufts a square meter");
+        assert!((0.4..MOST_COVER + MOST_CARDS).contains(&density), "{density} tufts a square meter");
         for p in &cover {
-            assert!(COVER.contains(&p.kind().name), "{} is no ground cover", p.kind().name);
+            assert!(COVER.iter().any(|c| c.name == p.kind().name), "{} is no ground cover", p.kind().name);
             assert!(p.band() < COVER_BANDS && p.height() < 1.0, "{} {} m tall, band {}", p.kind().name, p.height(), p.band());
             for tree in &trees {
                 let trunk = forest::SPECIES[tree.species].trunk * tree.scale;
