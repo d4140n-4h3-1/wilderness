@@ -985,7 +985,7 @@ mod tests {
     fn sticks_lie_under_the_trees_mostly_bare_and_leafier_under_broad_leaves() {
         let terrain = Terrain::new(1);
         let trees = forest::lay_out(1, &terrain);
-        let placements: Vec<Placement> = lay_out(1, &terrain, &trees).into_iter().flat_map(|c| c.placements).collect();
+        let placements: Vec<Placement> = lay_out(1, &terrain, &trees, true).into_iter().flat_map(|c| c.placements).collect();
         let first = PLANTS.len() + ROCKS.len();
         let sticks: Vec<&Placement> = placements.iter().filter(|p| p.kind >= first).collect();
         assert!(sticks.len() > trees.len() / 2, "{} sticks under {} trees", sticks.len(), trees.len());
