@@ -1,25 +1,35 @@
-//! A day going by, sped up: the sun rising, crossing the sky and setting, then the moon, with the
-//! sky, the light in the shade and the haze following.
+//! The days going by, sped up, on the engine's calendar ([`GameCalendar`]): the sun rising,
+//! crossing the sky and setting, then the moon, with the sky, the light in the shade and the haze
+//! following; and the year going round with them, the sun higher in summer and lower in winter, and
+//! the leaves turning (see `seasons.rs`).
 //!
-//! A whole day takes [`DAY_MINUTES`] and starts at [`START_HOUR`]: WILDERNESS_DAY=<minutes a whole
-//! day takes> and WILDERNESS_HOUR=<hour it starts at> say otherwise, and WILDERNESS_DAY=0 stops
-//! the clock in the afternoon, as the forest was before there were days. Measuring
-//! (WILDERNESS_BENCH), the afternoon stays unless WILDERNESS_DAY is set, so that runs compare.
-//! `[` and `]` step an hour back or forward; `P` pauses the clock.
+//! A whole day takes [`DAY_MINUTES`] and starts at [`START_HOUR`] on [`START_DATE`]:
+//! WILDERNESS_DAY=<minutes a whole day takes>, WILDERNESS_HOUR=<hour it starts at> and
+//! WILDERNESS_DATE=<month>-<day> say otherwise, and WILDERNESS_DAY=0 stops the clock in the
+//! afternoon, as the forest was before there were days. Measuring (WILDERNESS_BENCH), the
+//! afternoon stays unless WILDERNESS_DAY is set, so that runs compare. `[` and `]` step an hour
+//! back or forward, `,` and `.` a day, `-` and `=` a week; `P` pauses the clock.
 
 use fyrox::core::{
     algebra::{UnitQuaternion, Vector3},
+    calendar::{CalendarDate, GameCalendar, SECONDS_PER_DAY},
     color::Color,
+    log::Log,
 };
 
 /// How long a whole day takes, in minutes: an hour of it a minute.
 const DAY_MINUTES: f32 = 24.0;
 /// The hour a day starts at: the morning, the day ahead.
 const START_HOUR: f32 = 9.0;
+/// The date the forest starts on, month and day: mid-October, the birches and larches turning
+/// gold, the oaks and alders still green.
+pub const START_DATE: (u8, u8) = (10, 18);
 
-/// How far north the forest is, and how far north the sun is that day (early summer), in degrees.
+/// How far north the forest is, in degrees.
 const LATITUDE: f32 = 48.0;
-const DECLINATION: f32 = 20.0;
+/// How far the earth's axis is tilted, in degrees: how far north of the equator the sun stands at
+/// midsummer, and south at midwinter.
+const TILT: f32 = 23.44;
 
 /// The sun high up, and low, near the horizon.
 const SUN_HIGH: Color = Color::opaque(255, 244, 222);
@@ -59,13 +69,30 @@ const SKY: [(f32, Color); 5] = [
     (90.0, Color::opaque(110, 155, 215)),
 ];
 
-/// The time of day, going by.
+/// The date and the time of day, going by.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Day {
-    /// 0 to 24.
-    hour: f32,
-    hours_per_second: f32,
-    paused: bool,
+    calendar: GameCalendar,
+}
+
+/// The date WILDERNESS_DATE asks for (`<month>-<day>`, as `10-18`), or [`START_DATE`].
+pub fn start_date() -> CalendarDate {
+    let asked = std::env::var("WILDERNESS_DATE").ok();
+    let date = asked.as_deref().and_then(|date| {
+        let (month, day) = date.trim().split_once('-')?;
+        CalendarDate::new(1, month.parse().ok()?, day.parse().ok()?).ok()
+    });
+    if let (Some(asked), None) = (&asked, date) {
+        Log::warn(format!("WILDERNESS_DATE={asked} is not a month and a day, as 10-18"));
+    }
+    date.unwrap_or_else(|| CalendarDate::new(1, START_DATE.0, START_DATE.1).expect("a date"))
+}
+
+/// "18 Oct".
+pub fn date_text(date: CalendarDate) -> String {
+    const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    let (month, day) = date.month_day();
+    format!("{day} {}", MONTHS[month as usize - 1])
 }
 
 /// How everything is lit at one time of day.
@@ -99,47 +126,63 @@ pub struct Lighting {
 }
 
 impl Day {
-    /// The day WILDERNESS_DAY and WILDERNESS_HOUR ask for, if they do.
+    /// The day WILDERNESS_DAY, WILDERNESS_HOUR and WILDERNESS_DATE ask for, if they do.
     pub fn from_env() -> Option<Self> {
-        let minutes: f32 = match std::env::var("WILDERNESS_DAY") {
-            Ok(minutes) => minutes.parse().ok().filter(|m: &f32| *m > 0.0)?,
+        let minutes: f64 = match std::env::var("WILDERNESS_DAY") {
+            Ok(minutes) => minutes.parse().ok().filter(|m: &f64| *m > 0.0)?,
             Err(_) if crate::benchmarking() => return None,
-            Err(_) => DAY_MINUTES,
+            Err(_) => DAY_MINUTES as f64,
         };
-        let hour = std::env::var("WILDERNESS_HOUR")
+        let hour: f64 = std::env::var("WILDERNESS_HOUR")
             .ok()
             .and_then(|hour| hour.parse().ok())
-            .unwrap_or(START_HOUR);
-        Some(Self { hour: wrap(hour), hours_per_second: 24.0 / (minutes * 60.0), paused: false })
+            .unwrap_or(START_HOUR as f64);
+        let seconds = (hour * 3600.0).rem_euclid(SECONDS_PER_DAY);
+        let calendar = GameCalendar::new(start_date(), seconds, SECONDS_PER_DAY / (minutes * 60.0)).ok()?;
+        Some(Self { calendar })
     }
 
-    pub fn advance(&mut self, dt: f32) {
-        if !self.paused {
-            self.hour = wrap(self.hour + dt * self.hours_per_second);
-        }
+    /// Moves the clock on `dt` seconds; whether the date changed.
+    pub fn advance(&mut self, dt: f32) -> bool {
+        self.calendar.tick(dt as f64).unwrap_or(false)
     }
 
-    pub fn step(&mut self, hours: f32) {
-        self.hour = wrap(self.hour + hours);
+    /// Moves the clock on, or back, `hours`, paused or not; whether the date changed.
+    pub fn step(&mut self, hours: f32) -> bool {
+        self.calendar.advance_game_seconds(hours as f64 * 3600.0).unwrap_or(false)
     }
 
     pub fn toggle_pause(&mut self) {
-        self.paused = !self.paused;
+        self.calendar.set_paused(!self.calendar.is_paused());
     }
 
-    /// "06:45", and whether the clock is stopped.
+    pub fn date(&self) -> CalendarDate {
+        self.calendar.date()
+    }
+
+    /// The day of the year, 1 on January 1, with the time of day as a fraction.
+    pub fn day_of_year(&self) -> f32 {
+        self.calendar.fractional_day_of_year() as f32
+    }
+
+    fn hour(&self) -> f32 {
+        self.calendar.hour() as f32
+    }
+
+    /// "18 Oct 06:45", and whether the clock is stopped.
     pub fn clock(&self) -> String {
-        let minutes = (self.hour * 60.0) as u32;
+        let minutes = (self.hour() * 60.0) as u32;
         format!(
-            "{:02}:{:02}{}",
+            "{} {:02}:{:02}{}",
+            date_text(self.date()),
             minutes / 60,
             minutes % 60,
-            if self.paused { " (paused)" } else { "" }
+            if self.calendar.is_paused() { " (paused)" } else { "" }
         )
     }
 
     pub fn lighting(&self) -> Lighting {
-        let toward_sun = toward_sun(self.hour);
+        let toward_sun = toward_sun(self.hour(), self.day_of_year());
         let elevation = toward_sun.y.asin().to_degrees();
         // Below the horizon the sun fades out; once it is well down the moon, opposite, fades
         // in: between, both are dark, so the light turns round unseen.
@@ -167,24 +210,27 @@ impl Day {
             twilight: smoothstep(-10.0, -2.0, elevation) * (1.0 - smoothstep(4.0, 14.0, elevation)),
             stars: smoothstep(-4.0, -14.0, elevation),
             // A whole turn a day, and a little more (the stars come round four minutes early).
-            star_turn: (self.hour / 24.0 * 1.0027) * std::f32::consts::TAU,
+            star_turn: (self.hour() / 24.0 * 1.0027) * std::f32::consts::TAU,
         }
     }
 }
 
-/// A unit vector toward the sun at an hour of the day; the world's north is +z, its east -x.
-fn toward_sun(hour: f32) -> Vector3<f32> {
+/// How far north of the equator the sun stands on a day of the year, in degrees: furthest at the
+/// June solstice, about day 172, furthest south at the December one.
+fn declination(day_of_year: f32) -> f32 {
+    TILT * (std::f32::consts::TAU * (day_of_year - 81.0) / 365.0).sin()
+}
+
+/// A unit vector toward the sun at an hour of a day of the year; the world's north is +z, its
+/// east -x.
+fn toward_sun(hour: f32, day_of_year: f32) -> Vector3<f32> {
     let latitude = LATITUDE.to_radians();
-    let declination = DECLINATION.to_radians();
+    let declination = declination(day_of_year).to_radians();
     let hour_angle = ((hour - 12.0) * 15.0).to_radians();
     let east = -declination.cos() * hour_angle.sin();
     let north = declination.sin() * latitude.cos() - declination.cos() * hour_angle.cos() * latitude.sin();
     let up = declination.sin() * latitude.sin() + declination.cos() * hour_angle.cos() * latitude.cos();
     Vector3::new(-east, up, north).normalize()
-}
-
-fn wrap(hour: f32) -> f32 {
-    hour.rem_euclid(24.0)
 }
 
 fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
@@ -215,23 +261,48 @@ mod tests {
 
     #[test]
     fn sun_rises_in_the_east_and_is_south_at_noon() {
-        let morning = toward_sun(8.0);
+        let midsummer = 172.0;
+        let morning = toward_sun(8.0, midsummer);
         assert!(morning.x < 0.0 && morning.y > 0.0, "{morning:?}");
-        let noon = toward_sun(12.0);
+        let noon = toward_sun(12.0, midsummer);
         assert!(noon.z < 0.0 && noon.x.abs() < 1e-5, "{noon:?}");
         let elevation = noon.y.asin().to_degrees();
-        assert!((elevation - (90.0 - LATITUDE + DECLINATION)).abs() < 0.01, "{elevation}");
-        assert!(toward_sun(0.0).y < 0.0);
+        assert!((elevation - (90.0 - LATITUDE + TILT)).abs() < 0.05, "{elevation}");
+        assert!(toward_sun(0.0, midsummer).y < 0.0);
+    }
+
+    #[test]
+    fn the_sun_is_lower_in_winter_and_the_days_shorter() {
+        let noon = |day: f32| toward_sun(12.0, day).y.asin().to_degrees();
+        assert!((noon(355.0) - (90.0 - LATITUDE - TILT)).abs() < 0.1, "{}", noon(355.0));
+        assert!((noon(80.0) - (90.0 - LATITUDE)).abs() < 1.0, "{}", noon(80.0));
+        // At 7 in the morning the sun is up in June, not in December.
+        assert!(toward_sun(7.0, 172.0).y > 0.0 && toward_sun(7.0, 355.0).y < 0.0);
+    }
+
+    fn at(month: u8, day: u8, hour: f64) -> Day {
+        let date = CalendarDate::new(1, month, day).unwrap();
+        Day { calendar: GameCalendar::new(date, hour * 3600.0, 0.0).unwrap() }
     }
 
     #[test]
     fn light_shines_from_the_sun_by_day_and_the_moon_by_night() {
-        let day = Day { hour: 15.0, hours_per_second: 0.0, paused: false };
+        let day = at(6, 21, 15.0);
         let lit = day.lighting();
-        assert!((lit.rotation * Vector3::y() - toward_sun(15.0)).norm() < 1e-4);
+        assert!((lit.rotation * Vector3::y() - toward_sun(15.0, day.day_of_year())).norm() < 1e-4);
         assert_eq!(lit.strength, 1.0);
-        let night = Day { hour: 0.5, ..day }.lighting();
-        assert!((night.rotation * Vector3::y() + toward_sun(0.5)).norm() < 1e-4);
-        assert!(night.strength > 0.0 && night.strength <= MOON_STRENGTH);
+        let night = at(6, 21, 0.5);
+        let dark = night.lighting();
+        assert!((dark.rotation * Vector3::y() + toward_sun(0.5, night.day_of_year())).norm() < 1e-4);
+        assert!(dark.strength > 0.0 && dark.strength <= MOON_STRENGTH);
+    }
+
+    #[test]
+    fn stepping_crosses_midnight_into_the_next_day() {
+        let mut day = at(12, 31, 23.5);
+        assert!(day.step(1.0));
+        assert_eq!(day.date(), CalendarDate::new(2, 1, 1).unwrap());
+        assert_eq!(day.clock(), "1 Jan 00:30");
+        assert!(!day.step(1.0));
     }
 }

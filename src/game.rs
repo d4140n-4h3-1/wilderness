@@ -3,6 +3,8 @@
 
 use crate::{
     day::Day,
+    litter::Litter,
+    seasons::Seasons,
     floor::{self, Floor},
     flashlight::Flashlight,
     lantern::Lantern,
@@ -150,6 +152,14 @@ pub struct Wilderness {
     #[visit(skip)]
     #[reflect(hidden)]
     day: Option<Day>,
+    /// The plants' materials that change with the seasons (see `seasons.rs`), once planted.
+    #[visit(skip)]
+    #[reflect(hidden)]
+    seasons: Option<Seasons>,
+    /// The leaves fallen round the broad-leaved trees (see `litter.rs`), once planted.
+    #[visit(skip)]
+    #[reflect(hidden)]
+    litter: Option<Litter>,
     #[visit(skip)]
     #[reflect(hidden)]
     sun: Handle<DirectionalLight>,
@@ -333,7 +343,7 @@ impl Wilderness {
         light.set_color(lit.color);
         light.set_intensity(lit.strength);
         if self.planted {
-            let status = format!("{HELP}\n{}  ·  [ ] step an hour  ·  P pause", self.day.as_ref().unwrap().clock());
+            let status = format!("{HELP}\n{}  ·  [ ] an hour  ·  , . a day  ·  - = a week  ·  P pause", self.day.as_ref().unwrap().clock());
             if status != self.shown_status {
                 self.set_status(ctx, &status);
                 self.shown_status = status;
@@ -417,9 +427,34 @@ impl Wilderness {
         ));
         self.floor = Some(floor);
         self.wind = Some(wind_now);
+        // The plants as they look on the day the forest starts: every material at once.
+        let started = std::time::Instant::now();
+        let models: Vec<(&str, &ModelResource)> = model_paths().zip(&self.models).collect();
+        let mut seasons = Seasons::new(&models);
+        let drawn = seasons.update(self.day_of_year(), true);
+        Log::info(format!(
+            "Seasons: {drawn} materials drawn for {} in {:.2} s",
+            crate::day::date_text(self.date()),
+            started.elapsed().as_secs_f32()
+        ));
+        self.seasons = Some(seasons);
+        let mut litter = Litter::lay_out(seed, terrain, &trees);
+        litter.update(&mut ctx.scenes[self.scene].graph, self.day_of_year());
+        Log::info(format!("Litter: {} fallen leaves round the broad-leaved trees", litter.lying()));
+        self.litter = Some(litter);
         self.planted = true;
         self.set_status(ctx, HELP);
         true
+    }
+
+    /// The date: the calendar's, or with the clock stopped, the date the forest starts on.
+    fn date(&self) -> fyrox::core::calendar::CalendarDate {
+        self.day.as_ref().map_or_else(crate::day::start_date, Day::date)
+    }
+
+    /// The day of the year, with the time of day as a fraction (midday, the clock stopped).
+    fn day_of_year(&self) -> f32 {
+        self.day.as_ref().map_or_else(|| self.date().day_of_year() as f32 + 0.5, Day::day_of_year)
     }
 
     fn set_mouse_captured(&mut self, ctx: &mut PluginContext, captured: bool) {
@@ -566,6 +601,14 @@ impl Plugin for Wilderness {
         if !self.plant_when_loaded(ctx) {
             return Ok(());
         }
+        // The plants following the calendar: a material a frame, when a day has gone by.
+        let day = self.day_of_year();
+        if let Some(seasons) = &mut self.seasons {
+            seasons.update(day, false);
+        }
+        if let Some(litter) = &mut self.litter {
+            litter.update(&mut ctx.scenes[self.scene].graph, day);
+        }
         let scene = &mut ctx.scenes[self.scene];
         self.player.update(&mut scene.graph, ctx.dt);
         // The sun's direction, even at night (the light is the moon's then).
@@ -676,12 +719,25 @@ impl Plugin for Wilderness {
                         self.set_mouse_captured(&mut ctx, false);
                     } else if matches!(key, KeyCode::KeyF | KeyCode::KeyL) && down {
                         self.light_the_way(&mut ctx.scenes[self.scene].graph, *key == KeyCode::KeyF);
-                    } else if let (Some(day), true, KeyCode::BracketLeft | KeyCode::BracketRight | KeyCode::KeyP) =
-                        (&mut self.day, down, key)
+                    } else if let (
+                        Some(day),
+                        true,
+                        KeyCode::BracketLeft
+                        | KeyCode::BracketRight
+                        | KeyCode::Comma
+                        | KeyCode::Period
+                        | KeyCode::Minus
+                        | KeyCode::Equal
+                        | KeyCode::KeyP,
+                    ) = (&mut self.day, down, key)
                     {
                         match key {
-                            KeyCode::BracketLeft => day.step(-1.0),
-                            KeyCode::BracketRight => day.step(1.0),
+                            KeyCode::BracketLeft => _ = day.step(-1.0),
+                            KeyCode::BracketRight => _ = day.step(1.0),
+                            KeyCode::Comma => _ = day.step(-24.0),
+                            KeyCode::Period => _ = day.step(24.0),
+                            KeyCode::Minus => _ = day.step(-24.0 * 7.0),
+                            KeyCode::Equal => _ = day.step(24.0 * 7.0),
                             _ => day.toggle_pause(),
                         }
                     } else {
