@@ -334,7 +334,7 @@ impl Floor {
         wind: bool,
     ) -> Self {
         Self {
-            chunks: lay_out(seed, terrain, trees),
+            chunks: lay_out(seed, terrain, trees, !crate::grass_grows()),
             models,
             double_sided,
             wind,
@@ -571,7 +571,9 @@ impl Obstacles {
 
 /// Lays out every chunk's plants and rocks among `trees`, on `terrain`: the plants out of the
 /// water, the rocks mostly.
-fn lay_out(seed: u64, terrain: &Terrain, trees: &[Tree]) -> Vec<Chunk> {
+/// The floor laid out, in its chunks; with the ground cover's grass cards, if `cards` - left out
+/// where the engine's grass draws them (see [`crate::grass`]).
+fn lay_out(seed: u64, terrain: &Terrain, trees: &[Tree], cards: bool) -> Vec<Chunk> {
     let extent = extent();
     let across = (2.0 * extent / CHUNK).ceil() as usize;
     let thicket = Thicket::new(seed);
@@ -678,7 +680,9 @@ fn lay_out(seed: u64, terrain: &Terrain, trees: &[Tree]) -> Vec<Chunk> {
     // WILDERNESS_COVER=0 leaves the ground cover out.
     if std::env::var("WILDERNESS_COVER").as_deref() != Ok("0") {
         ground_cover(seed, terrain, &thicket, &clumps, &patches, &obstacles, &mut chunks, false);
-        ground_cover(seed, terrain, &thicket, &clumps, &patches, &obstacles, &mut chunks, true);
+        if cards {
+            ground_cover(seed, terrain, &thicket, &clumps, &patches, &obstacles, &mut chunks, true);
+        }
     }
     for chunk in &mut chunks {
         for placement in &chunk.placements {
@@ -876,8 +880,8 @@ mod tests {
     fn same_seed_same_floor() {
         let terrain = Terrain::new(2);
         let trees = forest::lay_out(2, &terrain);
-        let a: Vec<Placement> = lay_out(2, &terrain, &trees).into_iter().flat_map(|c| c.placements).collect();
-        let b: Vec<Placement> = lay_out(2, &terrain, &trees).into_iter().flat_map(|c| c.placements).collect();
+        let a: Vec<Placement> = lay_out(2, &terrain, &trees, true).into_iter().flat_map(|c| c.placements).collect();
+        let b: Vec<Placement> = lay_out(2, &terrain, &trees, true).into_iter().flat_map(|c| c.placements).collect();
         assert_eq!(a, b);
     }
 
@@ -885,7 +889,7 @@ mod tests {
     fn floor_keeps_off_trunks_and_grows_every_kind() {
         let terrain = Terrain::new(1);
         let trees = forest::lay_out(1, &terrain);
-        let placements: Vec<Placement> = lay_out(1, &terrain, &trees).into_iter().flat_map(|c| c.placements).collect();
+        let placements: Vec<Placement> = lay_out(1, &terrain, &trees, true).into_iter().flat_map(|c| c.placements).collect();
         let extent = extent();
         for p in &placements {
             assert!(p.position.x.abs() < extent && p.position.z.abs() < extent);
@@ -909,7 +913,7 @@ mod tests {
     fn ground_cover_is_low_thick_and_only_near() {
         let terrain = Terrain::new(1);
         let trees = forest::lay_out(1, &terrain);
-        let chunks = lay_out(1, &terrain, &trees);
+        let chunks = lay_out(1, &terrain, &trees, true);
         let cover: Vec<&Placement> = chunks.iter().flat_map(|c| &c.placements).filter(|p| p.cover.is_some()).collect();
         let extent = extent();
         let density = cover.len() as f32 / ((2.0 * extent) * (2.0 * extent));
@@ -935,7 +939,7 @@ mod tests {
     fn counts() {
         let terrain = Terrain::new(1);
         let trees = forest::lay_out(1, &terrain);
-        let placements: Vec<Placement> = lay_out(1, &terrain, &trees).into_iter().flat_map(|c| c.placements).collect();
+        let placements: Vec<Placement> = lay_out(1, &terrain, &trees, true).into_iter().flat_map(|c| c.placements).collect();
         for (index, kind) in kinds().enumerate() {
             println!("{}: {}", kind.name, placements.iter().filter(|p| p.kind == index).count());
         }
@@ -946,7 +950,7 @@ mod tests {
     fn gravel_lines_the_shores_and_boulders_stand_in_the_river() {
         let terrain = Terrain::new(1);
         let trees = forest::lay_out(1, &terrain);
-        let placements: Vec<Placement> = lay_out(1, &terrain, &trees).into_iter().flat_map(|c| c.placements).collect();
+        let placements: Vec<Placement> = lay_out(1, &terrain, &trees, true).into_iter().flat_map(|c| c.placements).collect();
         let named = |p: &Placement, name: &str| p.kind().name == name;
         let at_shore = |p: &Placement| {
             terrain.channels.iter().enumerate().any(|(c, _)| {

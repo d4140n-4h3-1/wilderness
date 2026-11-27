@@ -14,7 +14,7 @@
 //! the renderer draws it) - or a graphics card that cannot run them, which turns them off by itself
 //! and says why in the log; WILDERNESS_CANDELITE_VIEW=1 shows what Candelite's rays see, =lit with the
 //! light on it;
-//! WILDERNESS_WIND=0 stills the wind; WILDERNESS_FLOOR=0 leaves the forest floor
+//! WILDERNESS_GRASS=0 grows no grass; WILDERNESS_WIND=0 stills the wind; WILDERNESS_FLOOR=0 leaves the forest floor
 //! bare, and WILDERNESS_COVER=0 only the ground cover out of it.
 
 mod bed;
@@ -23,6 +23,7 @@ mod flashlight;
 mod floor;
 mod forest;
 mod game;
+mod grass;
 mod hud;
 mod lantern;
 mod models;
@@ -64,8 +65,11 @@ fn main() {
             named_objects: false,
         },
     );
-    executor.add_plugin(graphics_effects());
-    executor.add_plugin(game::Wilderness::default());
+    let effects = graphics_effects();
+    // The field the grass grows on, for the game to say where once the land is made.
+    let grass = effects.grass_field();
+    executor.add_plugin(effects);
+    executor.add_plugin(game::Wilderness::default().with_grass(grass));
     executor.run()
 }
 
@@ -84,6 +88,12 @@ pub fn walking() -> bool {
 /// Whether to log what the renderer did: WILDERNESS_STATS=1, or benchmarking.
 pub fn stats() -> bool {
     std::env::var("WILDERNESS_STATS").as_deref() == Ok("1") || benchmarking()
+}
+
+/// Whether grass grows over the land (unless WILDERNESS_GRASS=0): the engine's, blades drawn round
+/// the player in one draw (see [`grass`]).
+pub fn grass_grows() -> bool {
+    std::env::var("WILDERNESS_GRASS").as_deref() != Ok("0")
 }
 
 /// Whether the sun's shadows are traced (unless WILDERNESS_RT=0), rather than drawn from shadow
@@ -147,6 +157,9 @@ fn graphics_effects() -> fyrox_gfx::GraphicsEffects {
             reach: 150.0,
             ..shadows
         });
+    }
+    if grass_grows() {
+        effects = effects.with_grass(fyrox_gfx::GrassSettings::default());
     }
     effects
 }
