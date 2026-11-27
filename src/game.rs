@@ -57,10 +57,11 @@ use fyrox::{
 };
 use fyrox::{graph::SceneGraph, material::MaterialResourceExtension};
 
-/// Which forest grows, unless WILDERNESS_SEED says otherwise: the start in a sunny glade, a pond
-/// 18 m off and four within 80 m, a stream a short walk away. (Seed 6's river valley is still there
-/// with WILDERNESS_SEED=6.)
-pub const SEED: u64 = 18;
+/// Which forest grows, unless WILDERNESS_SEED says otherwise: the start at the edge of a glade, a
+/// pond 18 m off and another within 80 m, the river and a stream 13 m off with their bank grasses,
+/// birches, oaks and a rowan close by to turn with the seasons, alders and a willow along the
+/// water. (Seed 18's sunny glade, and seed 6's river valley, are still there with WILDERNESS_SEED.)
+pub const SEED: u64 = 28;
 /// Light from the sky on the side of things the sun is not on.
 const AMBIENT: Color = Color::opaque(128, 136, 146);
 /// The sun: warm, in the afternoon.
