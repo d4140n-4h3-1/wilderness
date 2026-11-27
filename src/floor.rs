@@ -96,7 +96,7 @@ const fn plant(
 }
 
 /// Every plant of the forest floor.
-pub const PLANTS: [Kind; 20] = [
+pub const PLANTS: [Kind; 22] = [
     plant("Bilberry", "data/plants/bilberry.glb", wind::SHRUB, 0.67, (1.0, 5.0), 10.0, (0.7, 1.3), 0.38),
     plant("Common heather", "data/plants/common-heather.glb", wind::SHRUB, 0.6, (3.0, 0.3), 12.0, (0.7, 1.3), 0.5),
     plant("Common broom", "data/plants/common-broom.glb", wind::SHRUB, 1.9, (0.8, 0.05), 18.0, (0.7, 1.2), 1.1),
@@ -119,6 +119,10 @@ pub const PLANTS: [Kind; 20] = [
     plant("Woodland grass carpet", "data/plants/woodland-grass-carpet.glb", wind::GRASS, 0.20, (0.0, 0.0), 6.0, (0.8, 1.25), 0.32),
     plant("Woodland grass fescue", "data/plants/woodland-grass-fescue.glb", wind::GRASS, 0.29, (0.0, 0.0), 5.0, (0.8, 1.2), 0.26),
     plant("Woodland grass bank", "data/plants/woodland-grass-bank.glb", wind::GRASS, 0.38, (0.0, 0.0), 7.0, (0.8, 1.2), 0.36),
+    // plant_life's stream-bank grasses: they grow along the channels' banks alone (see
+    // [`BANK_GRASSES`]), so none here.
+    plant("Floating sweet-grass", "data/plants/floating-sweet-grass.glb", wind::GRASS, 0.46, (0.0, 0.0), 6.0, (0.72, 1.02), 0.5),
+    plant("Creeping bent", "data/plants/creeping-bent.glb", wind::GRASS, 0.23, (0.0, 0.0), 6.0, (0.65, 1.25), 0.42),
 ];
 
 /// A kind of rock, and the box the player bumps into, if any: its half extents at the model's
@@ -254,6 +258,20 @@ const COVER: [Cover; 9] = [
 ];
 /// How near the water, in meters, the ground counts as damp, for the bank grass.
 const DAMP: f32 = 2.5;
+/// The grasses along the channels' banks, as plant_life's notes and the Birch Glade place them:
+/// each kind, how far past the waterline it grows, least and most, in meters (negative: in the
+/// water), the range of its size, and about how far apart along the bank. Floating sweet-grass
+/// where the water is only a few centimeters deep ([`SHALLOW`]), its blades trailing on it;
+/// creeping bent in broken mats on the mud just above the waterline; and tufted hairgrass's
+/// taller tussocks scattered along the damp upper edge.
+const BANK_GRASSES: [(&str, (f32, f32), (f32, f32), f32); 3] = [
+    ("Floating sweet-grass", (-0.30, -0.025), (0.72, 1.02), 0.55),
+    ("Creeping bent", (0.12, 0.46), (0.65, 1.25), 0.35),
+    ("Tufted hairgrass", (0.43, 1.05), (0.52, 0.94), 0.94),
+];
+/// How deep the water floating sweet-grass grows in, least and most, in meters: the deeper runs
+/// and the crossings stay open.
+const SHALLOW: (f32, f32) = (0.005, 0.12);
 /// How many tufts of ground cover grow on a square meter at most: of the floor's own plants, and of
 /// the grass cards (see [`Cover::sways`]), which grow apart, as thick as each can be. Of the floor's
 /// own plants, twice 2 took Yoctite's drawing from 2.5 ms to 5.4, the frame past 60 FPS's; the
@@ -893,6 +911,51 @@ fn shores(seed: u64, terrain: &Terrain, thicket: &Thicket, obstacles: &mut Obsta
             }
         }
     }
+    // The bank grasses, along both banks of every channel, in patches: a stretch of bank now and
+    // then left bare; none where a stream has run into the river, nor at a channel's ends.
+    for (c, channel) in terrain.channels.iter().enumerate() {
+        let total = *channel.distances.last().expect("a channel has points");
+        for side in 0..2 {
+            let mut random = Random::for_place(seed, c as i64, 0x2936 + side as i64);
+            let phase = random.between(0.0, std::f32::consts::TAU);
+            for &(name, offsets, scales, spacing) in &BANK_GRASSES {
+                let kind = index_of(name);
+                let mut along = 0.8;
+                while along < total - 0.85 {
+                    let here = along;
+                    along += spacing * random.between(0.69, 1.43);
+                    let i = channel.distances.partition_point(|&d| d <= here).saturating_sub(1).min(channel.points.len() - 2);
+                    let t = ((here - channel.distances[i]) / (channel.distances[i + 1] - channel.distances[i]).max(1e-6)).clamp(0.0, 1.0);
+                    let middle = channel.points[i].lerp(&channel.points[i + 1], t);
+                    if (1.4 * here + phase).sin() < -0.48
+                        || (c > 0 && terrain.near(0, middle.x, middle.y).is_some_and(|n| n.from_waterline() < 0.5))
+                    {
+                        continue;
+                    }
+                    let outward = crate::terrain::side_of(&channel.points, i) * if side == 0 { -1.0 } else { 1.0 };
+                    let waterline = channel.waterlines[i][side] + (channel.waterlines[i + 1][side] - channel.waterlines[i][side]) * t;
+                    let at = middle
+                        + outward * (waterline + random.between(offsets.0, offsets.1))
+                        + Vector2::new(outward.y, -outward.x) * random.between(-0.13, 0.13);
+                    let scale = random.between(scales.0, scales.1);
+                    let yaw = random.between(0.0, std::f32::consts::TAU);
+                    if obstacles.blocked(at, 0.3 * PLANTS[kind].radius * scale) {
+                        continue;
+                    }
+                    let fits = if offsets.1 < 0.0 {
+                        let water = channel.water(i) + (channel.water(i + 1) - channel.water(i)) * t;
+                        let depth = water - terrain.height(at.x, at.y);
+                        (SHALLOW.0..SHALLOW.1).contains(&depth)
+                    } else {
+                        !terrain.wet(at.x, at.y, 0.0)
+                    };
+                    if fits {
+                        place(chunks, kind, at, yaw, scale);
+                    }
+                }
+            }
+        }
+    }
     // The ponds' and springs' wet margins, as the Birch Glade dresses them: round every other
     // point of the water's edge, a little in or out, a cobble now and then, else hard fern, wood
     // melick or heather (not in the water); and at each spring, three boulders behind it, away
@@ -1067,9 +1130,41 @@ mod tests {
             .filter(|p| named(p, "Granite boulder") && terrain.near(0, p.position.x, p.position.z).is_some_and(|n| n.from_waterline() < 0.0))
             .count();
         assert!(in_river >= 4, "{in_river} boulders in the river");
-        // No plant in the water.
-        for p in placements.iter().filter(|p| p.kind < PLANTS.len()) {
+        // No plant in the water, but floating sweet-grass, in its shallows.
+        for p in placements.iter().filter(|p| p.kind < PLANTS.len() && !named(p, "Floating sweet-grass")) {
             assert!(!terrain.wet(p.position.x, p.position.z, 0.0), "{} in the water at {:?}", p.kind().name, p.position);
+        }
+    }
+
+    #[test]
+    fn bank_grasses_line_the_streams() {
+        let terrain = Terrain::new(1);
+        let trees = forest::lay_out(1, &terrain);
+        let placements: Vec<Placement> = lay_out(1, &terrain, &trees, true).into_iter().flat_map(|c| c.placements).collect();
+        let length: f32 = terrain.channels.iter().map(|c| *c.distances.last().unwrap()).sum();
+        for &(name, offsets, _, spacing) in &BANK_GRASSES {
+            // How far past the nearest channel's waterline each grows; tufted hairgrass grows
+            // in the open too, out of any channel's reach, and is left out.
+            let grown: Vec<f32> = placements
+                .iter()
+                .filter(|p| p.kind().name == name)
+                .map(|p| {
+                    (0..terrain.channels.len())
+                        .filter_map(|c| terrain.near(c, p.position.x, p.position.z))
+                        .map(|n| n.from_waterline())
+                        .fold(f32::INFINITY, f32::min)
+                })
+                .filter(|from| *from < 3.0)
+                .collect();
+            // Both banks, about one every `spacing`, less the bare stretches and what is in the way.
+            assert!(grown.len() as f32 > 0.3 * length / spacing, "only {} {name} along {length} m", grown.len());
+            // (Tufted hairgrass grows near the banks from the open's scatter too, as near as any
+            // plant may: only that it is out of the water.)
+            let exclusive = name != "Tufted hairgrass";
+            let least = if exclusive { offsets.0 - 0.3 } else { 0.0 };
+            for from in grown {
+                assert!(from > least && (!exclusive || from < offsets.1 + 0.3), "{name} {from} m from the waterline");
+            }
         }
     }
 }
