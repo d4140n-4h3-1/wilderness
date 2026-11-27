@@ -21,6 +21,14 @@ fyrox-gfx = { git = "https://github.com/d4140n-4h3-1/Hydroxus.git", branch = "vu
 
 # Optimized engine, debuggable game code. Without this a `cargo run` build is too slow to walk
 # through a forest.
+#
+# The game's own code a little optimized too: unoptimized, laying out and planting the forest -
+# some 2,000 trees and 85,000 plants - and swaying it every frame left it at 0-2 FPS, the forest
+# never drawn in the first minute; at opt-level 1 it plays within seconds, 30 FPS rising to 60 as
+# Yoctite finishes building, rebuilds as quickly after an edit, and still debugs.
+[profile.dev]
+opt-level = 1
+
 [profile.dev.package."*"]
 opt-level = 3
 debug-assertions = false
