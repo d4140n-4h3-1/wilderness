@@ -73,6 +73,9 @@ const SKY: [(f32, Color); 5] = [
 #[derive(Debug, Clone, PartialEq)]
 pub struct Day {
     calendar: GameCalendar,
+    /// The game's hours gone by since the start, stepped ones too: for what builds up with time,
+    /// as snow.
+    hours_gone: f64,
 }
 
 /// The date WILDERNESS_DATE asks for (`<month>-<day>`, as `10-18`), or [`START_DATE`].
@@ -139,17 +142,26 @@ impl Day {
             .unwrap_or(START_HOUR as f64);
         let seconds = (hour * 3600.0).rem_euclid(SECONDS_PER_DAY);
         let calendar = GameCalendar::new(start_date(), seconds, SECONDS_PER_DAY / (minutes * 60.0)).ok()?;
-        Some(Self { calendar })
+        Some(Self { calendar, hours_gone: 0.0 })
     }
 
     /// Moves the clock on `dt` seconds; whether the date changed.
     pub fn advance(&mut self, dt: f32) -> bool {
+        if !self.calendar.is_paused() {
+            self.hours_gone += dt as f64 * self.calendar.rate() / 3600.0;
+        }
         self.calendar.tick(dt as f64).unwrap_or(false)
     }
 
     /// Moves the clock on, or back, `hours`, paused or not; whether the date changed.
     pub fn step(&mut self, hours: f32) -> bool {
+        self.hours_gone += hours as f64;
         self.calendar.advance_game_seconds(hours as f64 * 3600.0).unwrap_or(false)
+    }
+
+    /// The game's hours gone by since the start, stepped ones too.
+    pub fn hours_gone(&self) -> f64 {
+        self.hours_gone
     }
 
     pub fn toggle_pause(&mut self) {
@@ -282,7 +294,7 @@ mod tests {
 
     fn at(month: u8, day: u8, hour: f64) -> Day {
         let date = CalendarDate::new(1, month, day).unwrap();
-        Day { calendar: GameCalendar::new(date, hour * 3600.0, 0.0).unwrap() }
+        Day { calendar: GameCalendar::new(date, hour * 3600.0, 0.0).unwrap(), hours_gone: 0.0 }
     }
 
     #[test]

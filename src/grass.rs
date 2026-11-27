@@ -46,6 +46,21 @@ const OFF_WATER: f32 = 0.3;
 /// How thick the grass is under the darkest canopy, against a glade's.
 const IN_SHADE: f32 = 0.25;
 
+/// How deep the snow lies at each of the map's samples (see [`map`]), in meters: for the grass
+/// it covers whole to be left out.
+pub fn snow_depths(snow: &crate::snow::Snow, terrain: &Terrain) -> Vec<f32> {
+    let extent = forest::HALF_EXTENT + crate::game::BORDER;
+    let samples = (2.0 * extent / SPACING).ceil() as u32 + 1;
+    let mut depths = Vec::with_capacity((samples * samples) as usize);
+    for row in 0..samples {
+        for column in 0..samples {
+            let (x, z) = (-extent + column as f32 * SPACING, -extent + row as f32 * SPACING);
+            depths.push(snow.depth_at(terrain, x, z));
+        }
+    }
+    depths
+}
+
 /// The map of where grass grows on `terrain`, among `trees`, from `seed`.
 pub fn map(seed: u64, terrain: &Terrain, trees: &[Tree]) -> GrassMap {
     let extent = forest::HALF_EXTENT + crate::game::BORDER;

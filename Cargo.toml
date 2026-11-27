@@ -17,6 +17,9 @@ fyrox = { git = "https://github.com/d4140n-4h3-1/Hydroxus.git", branch = "vulkan
 serde_json = "1"
 # The wind's morph targets are stored as half floats.
 half = "2"
+# Encoding the snow's crystal maps, so the engine makes their mip levels as it loads them: the
+# version the engine itself uses.
+image = { version = "0.25", default-features = false, features = ["png"] }
 fyrox-gfx = { git = "https://github.com/d4140n-4h3-1/Hydroxus.git", branch = "vulkan", features = ["raytracing"] }
 
 # Optimized engine, debuggable game code. Without this a `cargo run` build is too slow to walk

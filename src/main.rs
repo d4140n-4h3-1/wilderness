@@ -32,6 +32,7 @@ mod player;
 mod random;
 mod seasons;
 mod sky;
+mod snow;
 mod sound;
 mod terrain;
 mod water;

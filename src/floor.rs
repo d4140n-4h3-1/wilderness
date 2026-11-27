@@ -357,6 +357,14 @@ struct Chunk {
 struct Spawned {
     root: Handle<Node>,
     sways: Vec<Sway>,
+    /// Each plant or rock: its copy, how tall it stands, where (x and z), and its sway's index,
+    /// if it sways; and whether the snow covers it whole, hidden.
+    plants: Vec<(Handle<Node>, f32, Vector2<f32>, Option<usize>)>,
+    buried: Vec<bool>,
+    /// Whether each of the sways is of a plant buried.
+    still: Vec<bool>,
+    /// The snow's hours it was last looked at under.
+    snow_seen: Option<f32>,
 }
 
 /// The whole forest floor.
@@ -518,7 +526,10 @@ impl Floor {
                     *spawned = None;
                     continue;
                 }
-                for sway in &mut group.sways {
+                for (sway, &still) in group.sways.iter_mut().zip(&group.still) {
+                    if still {
+                        continue;
+                    }
                     let distance = (sway.at() - player.xz()).norm();
                     let shown = 1.0 - crate::random::smoothstep(SWAY.0, SWAY.1, distance);
                     sway.update(wind, dt, graph, shown, wind::detail_at(distance), wind::every_at(distance));
@@ -542,6 +553,7 @@ impl Floor {
         let chunk = &self.chunks[index];
         let mut roots = Vec::new();
         let mut sways = Vec::new();
+        let mut plants = Vec::new();
         for placement in &chunk.bands[band] {
             let kind = placement.kind();
             let root = self.models[placement.kind].instantiate(scene);
@@ -564,6 +576,7 @@ impl Floor {
             // and the other tufts only in its first COVER_SWAYS bands.
             let swaying = placement.cover.is_none_or(|band| band < COVER_SWAYS)
                 || COVER.iter().any(|cover| cover.sways && cover.name == kind.name);
+            let swayed = sways.len();
             if let (true, Some(profile), true) = (self.wind, kind.wind, swaying) {
                 sways.extend(mesh_of(graph, root).and_then(|mesh| {
                     Sway::new(
@@ -577,14 +590,44 @@ impl Floor {
                     )
                 }));
             }
+            plants.push((root, placement.height(), placement.position.xz(), (sways.len() > swayed).then_some(swayed)));
             roots.push(root);
         }
         let graph = &mut scene.graph;
         let root = PivotBuilder::new(roots.into_iter().fold(BaseBuilder::new().with_name("Floor"), BaseBuilder::with_child))
             .build(graph)
             .to_base();
-        Spawned { root, sways }
+        let buried = vec![false; plants.len()];
+        let still = vec![false; sways.len()];
+        Spawned { root, sways, plants, buried, still, snow_seen: None }
     }
+
+    /// Hides the plants and rocks in the scene that the snow covers whole - `depth` how high its
+    /// surface is over the ground at a place (x, z), `hours` how much has fallen - and shows them
+    /// again as it melts: those it covers are neither drawn nor swayed. Looks again only at
+    /// those put in since, or all of them when the snow has changed.
+    pub fn bury(&mut self, graph: &mut Graph, hours: f32, depth: impl Fn(f32, f32) -> f32) {
+        for chunk in &mut self.chunks {
+            for group in chunk.spawned.iter_mut().flatten() {
+                if group.snow_seen == Some(hours) {
+                    continue;
+                }
+                group.snow_seen = Some(hours);
+                for (k, &(root, height, at, sway)) in group.plants.iter().enumerate() {
+                    let buried = hours > 0.0 && depth(at.x, at.y) >= height;
+                    if buried != group.buried[k] {
+                        group.buried[k] = buried;
+                        graph[root].set_visibility(!buried);
+                        if let Some(sway) = sway {
+                            group.still[sway] = buried;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+
 }
 
 /// How far the floor reaches from the middle along x and z: to the walls round the ground.

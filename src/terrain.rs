@@ -623,6 +623,23 @@ impl Terrain {
         (water / weight - BED_CLEAR).min(ground + relief / weight * most)
     }
 
+    /// How deep the water stands over the ground at `x`, `z`, in meters: 0 out of it.
+    pub fn water_depth(&self, x: f32, z: f32) -> f32 {
+        let ground = self.height(x, z);
+        let mut depth = 0.0f32;
+        self.each_near(x, z, |_, near| {
+            if near.from_waterline() < 0.0 {
+                depth = depth.max(near.water - ground);
+            }
+        });
+        for basin in &self.basins {
+            if (Vector2::new(x, z) - basin.center).norm() < basin.reach() && basin.from_waterline(x, z) < 0.0 {
+                depth = depth.max(basin.level - ground);
+            }
+        }
+        depth.max(0.0)
+    }
+
     /// Whether `x`, `z` is under water, or nearer to it than `margin` meters.
     pub fn wet(&self, x: f32, z: f32, margin: f32) -> bool {
         let mut wet = false;

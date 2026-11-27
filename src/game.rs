@@ -59,12 +59,12 @@ use fyrox::{
 use fyrox::{graph::SceneGraph, material::MaterialResourceExtension};
 
 /// Which forest grows, unless WILDERNESS_SEED says otherwise: the start in the open, under the sky
-/// to see the rain and snow come down, a few trees round it; the river and a stream 12 m off, with
-/// their bank grasses, and a pond 18 m; eleven birches, oaks and rowans within 30 m to turn with
-/// the seasons, eight alders and willows along the water within 60 m; and most of the dry ground
-/// near gentle enough for the snow to lie. (Seed 28's, 18's and 6's forests are still there with
-/// WILDERNESS_SEED.)
-pub const SEED: u64 = 67;
+/// to see the rain and snow come down and the snow build up, a few trees round it; the river by
+/// it, a stream 15 m off and a pond 24 m, with their bank grasses; ten birches, oaks and rowans
+/// within 30 m to turn with the seasons, sixteen alders and willows along the water within 60 m,
+/// and five spruces, pines and firs within 20 m for the snow to lie on. (Seeds 67, 28, 18 and 6
+/// are still there with WILDERNESS_SEED.)
+pub const SEED: u64 = 143;
 /// Light from the sky on the side of things the sun is not on.
 const AMBIENT: Color = Color::opaque(128, 136, 146);
 /// The sun: warm, in the afternoon.
@@ -164,6 +164,14 @@ pub struct Wilderness {
     #[visit(skip)]
     #[reflect(hidden)]
     weather: Option<Weather>,
+    /// The hours of snow the grass was last told of.
+    #[visit(skip)]
+    #[reflect(hidden)]
+    grass_snow: Option<f32>,
+    /// The game's hours gone by when the snow was last told (see `Day::hours_gone`).
+    #[visit(skip)]
+    #[reflect(hidden)]
+    hours_seen: f64,
     /// The leaves fallen round the broad-leaved trees (see `litter.rs`), once planted.
     #[visit(skip)]
     #[reflect(hidden)]
@@ -376,7 +384,8 @@ impl Wilderness {
         light.set_color(lit.color);
         light.set_intensity(lit.strength);
         if self.planted {
-            let status = format!("{HELP}\n{}  ·  [ ] an hour  ·  , . a day  ·  - = a week  ·  P pause", self.day.as_ref().unwrap().clock());
+            let weather = self.weather.as_ref().map_or_else(String::new, |w| format!("  ·  {}", w.text()));
+            let status = format!("{HELP}\n{}{weather}  ·  [ ] an hour  ·  , . a day  ·  - = a week  ·  P pause", self.day.as_ref().unwrap().clock());
             if status != self.shown_status {
                 self.set_status(ctx, &status);
                 self.shown_status = status;
@@ -451,11 +460,6 @@ impl Wilderness {
         if let Some(loam) = self.models.last().filter(|m| m.is_ok()) {
             if let (Some(loam), Some(weather)) = (lay_loam(scene, loam, &self.ground), &mut self.weather) {
                 weather.set_loam(loam);
-            }
-            // The snow laid now, if it is snowing from the start.
-            if let (Some(weather), Some(terrain)) = (&mut self.weather, &self.terrain) {
-                let kind = weather.kind();
-                weather.set(&mut scene.graph, kind, Some(terrain));
             }
         }
         Log::info(format!(
@@ -672,6 +676,33 @@ impl Plugin for Wilderness {
             lamps: crate::water::lamps_near(&scene.graph, eye),
         };
         self.water.update(scene, &lights, eye, wading, ctx.dt);
+        // The snow building up as it snows, and melting after; its places laid out the first time
+        // it snows.
+        if let (Some(weather), Some(terrain)) = (&mut self.weather, &self.terrain) {
+            if !weather.has_snow() && weather.kind() == crate::weather::Kind::Snow {
+                let trees: Vec<(&str, &ModelResource)> = model_paths().zip(&self.models).take(SPECIES.len()).collect();
+                weather.set_snow(&mut scene.graph, crate::snow::Snow::lay_out(terrain, &trees));
+            }
+            let hours = self.day.as_ref().map(|day| {
+                let gone = day.hours_gone();
+                let passed = gone - self.hours_seen;
+                self.hours_seen = gone;
+                passed as f32
+            });
+            weather.pass(&mut scene.graph, hours);
+            // What the snow covers whole is not drawn: the plants and rocks on the floor, and the
+            // clumps of grass (told how deep it lies each hour of it).
+            if let Some(snow) = weather.snow() {
+                if let Some(floor) = &mut self.floor {
+                    floor.bury(&mut scene.graph, snow.hours(), |x, z| snow.depth_at(terrain, x, z));
+                }
+                let whole_hours = snow.hours().ceil();
+                if let (Some(grass), true) = (&self.grass, self.grass_snow != Some(whole_hours)) {
+                    self.grass_snow = Some(whole_hours);
+                    grass.set_snow((whole_hours > 0.0).then(|| crate::grass::snow_depths(snow, terrain)));
+                }
+            }
+        }
         // The rain or snow, blown by the wind where the player stands, lit by the sky.
         if let Some(weather) = &mut self.weather {
             let push = self.wind.as_ref().map_or(Vector2::zeros(), |wind| wind.at(eye.x, eye.z));
@@ -774,7 +805,7 @@ impl Plugin for Wilderness {
                     } else if *key == KeyCode::KeyR && down {
                         if let Some(weather) = &mut self.weather {
                             let next = weather.kind().next();
-                            weather.set(&mut ctx.scenes[self.scene].graph, next, self.terrain.as_ref());
+                            weather.set(&mut ctx.scenes[self.scene].graph, next);
                         }
                     } else if matches!(key, KeyCode::KeyF | KeyCode::KeyL) && down {
                         self.light_the_way(&mut ctx.scenes[self.scene].graph, *key == KeyCode::KeyF);
