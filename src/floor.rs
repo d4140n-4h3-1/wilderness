@@ -1,5 +1,8 @@
 //! The forest floor: shrubs, ferns, grasses, wildflowers and granite rocks, among the trees.
 //!
+//! Fallen sticks lie under the trees, as plant_life's notes place them: mostly bare, some with
+//! dry leaves still on, more of those under the broad-leaved trees than the conifers ([`STICKS`]).
+//!
 //! Each kind grows where it would: heather, grasses, poppies and broom in the glades; bilberry,
 //! hard fern, wood sorrel and wood melick in the shade of the thickets; bracken and bluebells in
 //! both. Plants of a kind gather in patches, as they spread, and the floor is thicker in the open
@@ -160,9 +163,38 @@ pub const ROCKS: [Rock; 3] = [
     },
 ];
 
-/// Every kind on the floor, plants then rocks: what [`Placement::kind`] counts through.
+/// A fallen stick: still, lying flat, for the player to step over. Its height stands for how far
+/// off it is seen - a share of its length, as it lies - and casts no shadow.
+const fn stick(name: &'static str, path: &'static str, length: f32) -> Kind {
+    Kind {
+        name,
+        path,
+        wind: None,
+        height: 0.4 * length,
+        open: 0.0,
+        shade: 0.0,
+        patch: 1.0,
+        scale: (0.85, 1.15),
+        radius: 0.5 * length,
+    }
+}
+
+/// plant_life's fallen sticks (CC0): bare and with dry leaves, twigs and forks.
+pub const STICKS: [Kind; 4] = [
+    stick("Bare twig", "data/props/fallen-bare-twig.glb", 0.52),
+    stick("Bare fork", "data/props/fallen-bare-fork.glb", 0.92),
+    stick("Leafy twig", "data/props/fallen-leafy-twig.glb", 0.63),
+    stick("Leafy fork", "data/props/fallen-leafy-fork.glb", 1.20),
+];
+/// How many sticks lie under a tree, at most; and the share of them with leaves still on, under a
+/// broad-leaved tree and under a conifer.
+const STICKS_PER_TREE: u32 = 3;
+const LEAFY_UNDER: (f32, f32) = (0.3, 0.08);
+
+/// Every kind on the floor, plants, then rocks, then sticks: what [`Placement::kind`] counts
+/// through.
 pub fn kinds() -> impl Iterator<Item = &'static Kind> {
-    PLANTS.iter().chain(ROCKS.iter().map(|rock| &rock.kind))
+    PLANTS.iter().chain(ROCKS.iter().map(|rock| &rock.kind)).chain(STICKS.iter())
 }
 
 /// How wide a chunk is, in meters: small, so that the nearest band, of the smallest plants,
@@ -289,7 +321,7 @@ impl Placement {
     }
 
     fn rock(&self) -> Option<&'static Rock> {
-        self.kind.checked_sub(PLANTS.len()).map(|i| &ROCKS[i])
+        self.kind.checked_sub(PLANTS.len()).and_then(|i| ROCKS.get(i))
     }
 }
 
@@ -634,6 +666,7 @@ fn lay_out(seed: u64, terrain: &Terrain, trees: &[Tree]) -> Vec<Chunk> {
     }
 
     shores(seed, terrain, &thicket, &mut obstacles, &mut chunks, extent, across);
+    sticks(seed, terrain, trees, &obstacles, &mut chunks, extent, across);
 
     for (index, chunk) in chunks.iter_mut().enumerate() {
         let mut random = Random::for_place(seed, index as i64, 2);
@@ -751,6 +784,45 @@ fn ground_cover(
                 scale,
                 shelter: 1.0 - 0.6 * thickness,
                 cover: Some(band),
+            });
+        }
+    }
+}
+
+/// The fallen sticks: up to [`STICKS_PER_TREE`] under each tree, within its crown and clear of its
+/// trunk, rocks and the water; mostly bare, with leaves on as often as [`LEAFY_UNDER`] says for its
+/// kind of tree; twigs and forks alike.
+fn sticks(seed: u64, terrain: &Terrain, trees: &[Tree], obstacles: &Obstacles, chunks: &mut [Chunk], extent: f32, across: usize) {
+    let first = PLANTS.len() + ROCKS.len();
+    for (index, tree) in trees.iter().enumerate() {
+        let mut random = Random::for_place(seed, index as i64, 0x571c);
+        let species = &forest::SPECIES[tree.species];
+        let leafy = if species.wind == wind::DECIDUOUS { LEAFY_UNDER.0 } else { LEAFY_UNDER.1 };
+        let (trunk, crown) = (species.trunk * tree.scale, species.crown * tree.scale);
+        let count = (random.unit() * (STICKS_PER_TREE + 1) as f32) as u32;
+        for _ in 0..count {
+            let angle = random.between(0.0, std::f32::consts::TAU);
+            let reach = random.between(trunk + 0.4, (0.9 * crown).max(trunk + 0.6));
+            let at = tree.position.xz() + Vector2::new(angle.cos(), angle.sin()) * reach;
+            if at.x.abs() >= extent || at.y.abs() >= extent || terrain.wet(at.x, at.y, PLANTS_OFF_WATER) {
+                continue;
+            }
+            let leaves = random.unit() < leafy;
+            let fork = random.unit() < 0.5;
+            let kind = first + 2 * leaves as usize + fork as usize;
+            let scale = random.between(STICKS[kind - first].scale.0, STICKS[kind - first].scale.1);
+            if obstacles.blocked(at, 0.15 * scale) {
+                continue;
+            }
+            let column = (((at.x + extent) / CHUNK) as usize).min(across - 1);
+            let row = (((at.y + extent) / CHUNK) as usize).min(across - 1);
+            chunks[row * across + column].placements.push(Placement {
+                kind,
+                position: Vector3::new(at.x, terrain.height(at.x, at.y), at.y),
+                yaw: random.between(0.0, std::f32::consts::TAU),
+                scale,
+                shelter: 1.0,
+                cover: None,
             });
         }
     }
@@ -903,6 +975,36 @@ mod tests {
         let area = (2.0 * extent) * (2.0 * extent);
         let density = placements.iter().filter(|p| p.cover.is_none()).count() as f32 / area;
         assert!((0.3..1.5).contains(&density), "{density} a square meter");
+    }
+
+    #[test]
+    fn sticks_lie_under_the_trees_mostly_bare_and_leafier_under_broad_leaves() {
+        let terrain = Terrain::new(1);
+        let trees = forest::lay_out(1, &terrain);
+        let placements: Vec<Placement> = lay_out(1, &terrain, &trees).into_iter().flat_map(|c| c.placements).collect();
+        let first = PLANTS.len() + ROCKS.len();
+        let sticks: Vec<&Placement> = placements.iter().filter(|p| p.kind >= first).collect();
+        assert!(sticks.len() > trees.len() / 2, "{} sticks under {} trees", sticks.len(), trees.len());
+        let (mut leafy, mut leafy_broad, mut broad) = (0, 0, 0);
+        for stick in &sticks {
+            assert!(stick.rock().is_none() && stick.kind().wind.is_none());
+            let under = trees
+                .iter()
+                .find(|t| {
+                    let species = &forest::SPECIES[t.species];
+                    (t.position.xz() - stick.position.xz()).norm() <= (0.9 * species.crown * t.scale).max(species.trunk * t.scale + 0.6) + 1.0e-3
+                })
+                .unwrap_or_else(|| panic!("{} under no tree", stick.kind().name));
+            let leaves = stick.kind >= first + 2;
+            leafy += leaves as usize;
+            if forest::SPECIES[under.species].wind == wind::DECIDUOUS {
+                broad += 1;
+                leafy_broad += leaves as usize;
+            }
+        }
+        assert!(leafy * 3 < sticks.len(), "mostly bare: {leafy} of {} leafy", sticks.len());
+        let (share_broad, share) = (leafy_broad as f32 / broad.max(1) as f32, leafy as f32 / sticks.len() as f32);
+        assert!(share_broad > share, "leafier under broad leaves: {share_broad} against {share}");
     }
 
     #[test]
