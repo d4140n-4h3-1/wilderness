@@ -11,6 +11,13 @@
 //! depends on its height: a hawthorn shows from far off, a tuft of fescue only from a few steps.
 //! The models are detailed, thousands of triangles to a tuft, so this keeps the floor's share of
 //! the frame small. Plants too low to cast a shadow worth tracing cast none.
+//!
+//! Over the soil between, a carpet of low growth - grasses, sorrel, heather and ferns, [`COVER`] -
+//! grows thicker still, but only near the player: each tuft shows within
+//! 4.5, 7 or 10 m of them ([`COVER_BANDS`]), more of them the nearer, so the carpet is whole
+//! underfoot and thins out to the floor's own plants a few steps off, rather than ending at a line.
+//! It casts no shadow, and stands still in the wind (see [`COVER_SWAYS`]): a carpet's shadows
+//! hardly show, and tracing them, and bending thousands of tufts every frame, cost the most of it.
 
 use crate::{
     forest::{self, Thicket, Tree},
@@ -160,8 +167,38 @@ const CHUNK: f32 = 8.0;
 const REACH_PER_HEIGHT: f32 = 36.0;
 const REACH: (f32, f32) = (10.0, 75.0);
 /// The distances plants are put into the scene within, in meters, each plant at the first not
-/// short of its reach: the plants of a chunk come and go together, a band at a time.
-const BANDS: [f32; 5] = [12.0, 20.0, 32.0, 48.0, 75.0];
+/// short of its reach: the plants of a chunk come and go together, a band at a time. The first
+/// [`COVER_BANDS`] are the ground cover's alone.
+const BANDS: [f32; 8] = [4.5, 7.0, 10.0, 12.0, 20.0, 32.0, 48.0, 75.0];
+/// The nearest of the [`BANDS`] the floor's own plants show in: the ground cover's are nearer.
+const NEAREST_PLANTS: f32 = 12.0;
+/// How many of the [`BANDS`] the ground cover grows in, nearest first, and the share of it in
+/// each: the most underfoot, fewer further off.
+const COVER_BANDS: usize = 3;
+const COVER_SHARES: [f32; COVER_BANDS] = [0.5, 0.3, 0.2];
+/// How many of the cover's bands, nearest first, sway in the wind; the rest stand still. None:
+/// a tuft swaying is bent anew every frame, for Yoctite to draw and for Candelite's rays and the
+/// shadows' to trace - swaying in the nearest band alone took the frame from about 11 ms of the
+/// GPU's to 14, all of it to 17 (30 FPS). Standing still, the carpet costs under a millisecond,
+/// and the floor's own plants in it - bracken, bilberry, bluebells - still sway.
+const COVER_SWAYS: usize = 0;
+/// The ground cover's kinds: low, as thick as a carpet, and light - a few thousand triangles a
+/// tuft at most, drawn whole so near. Bilberry (7,600) and bluebells (5,000) stay the floor's
+/// own: in the carpet they took the frame past 60 FPS's. Each grows where it would (see
+/// [`Kind::open`]), and it keeps clear of trunks, rocks and the water as the rest of the floor.
+const COVER: [&str; 6] = [
+    "Sheep fescue",
+    "Tufted hairgrass",
+    "Wood melick",
+    "Wood sorrel",
+    "Common heather",
+    "Hard fern",
+];
+/// How many tufts of ground cover grow on a square meter at most; and how small they are, as a
+/// share of their kind's size: low, under the floor's own plants. Twice as thick took Yoctite's
+/// drawing from 2.5 ms to 5.4, the frame past 60 FPS's.
+const MOST_COVER: f32 = 2.0;
+const COVER_SCALE: f32 = 0.8;
 /// How far from the water's edge plants keep, in meters; and the share of rocks that may lie in
 /// the water.
 const PLANTS_OFF_WATER: f32 = 0.1;
@@ -195,6 +232,9 @@ pub struct Placement {
     pub scale: f32,
     /// How much of the wind reaches it.
     pub shelter: f32,
+    /// For ground cover, which of the first [`COVER_BANDS`] it shows in; [`None`] for the rest,
+    /// which show by their height.
+    pub cover: Option<usize>,
 }
 
 impl Placement {
@@ -207,10 +247,15 @@ impl Placement {
         self.kind().height * self.scale
     }
 
-    /// Which of the [`BANDS`] it comes and goes in.
+    /// Which of the [`BANDS`] it comes and goes in: the ground cover's own, or the first past
+    /// those not short of its reach.
     fn band(&self) -> usize {
+        if let Some(band) = self.cover {
+            return band;
+        }
         let reach = (REACH_PER_HEIGHT * self.height()).clamp(REACH.0, REACH.1);
-        BANDS.iter().position(|band| *band >= reach * 0.85).unwrap_or(BANDS.len() - 1)
+        let reach = (reach * 0.85).max(NEAREST_PLANTS);
+        BANDS.iter().position(|band| *band >= reach).unwrap_or(BANDS.len() - 1)
     }
 
     fn rock(&self) -> Option<&'static Rock> {
@@ -425,13 +470,15 @@ impl Floor {
                 .set_scale(Vector3::repeat(placement.scale));
             prepared.prepare(graph, root, &self.double_sided[placement.kind], self.wind);
             let shadow_height = if crate::traced_shadows() { SHADOW_HEIGHT.0 } else { SHADOW_HEIGHT.1 };
-            if placement.height() < shadow_height {
+            if placement.height() < shadow_height || placement.cover.is_some() {
                 let nodes: Vec<Handle<Node>> = graph.traverse_handle_iter(root).collect();
                 for node in nodes {
                     graph[node].set_cast_shadows(false);
                 }
             }
-            if let (true, Some(profile)) = (self.wind, kind.wind) {
+            // Of the ground cover, only the tufts in its first COVER_SWAYS bands sway.
+            let swaying = placement.cover.is_none_or(|band| band < COVER_SWAYS);
+            if let (true, Some(profile), true) = (self.wind, kind.wind, swaying) {
                 sways.extend(mesh_of(graph, root).and_then(|mesh| {
                     Sway::new(
                         graph,
@@ -549,6 +596,7 @@ fn lay_out(seed: u64, terrain: &Terrain, trees: &[Tree]) -> Vec<Chunk> {
                 yaw: random.between(0.0, std::f32::consts::TAU),
                 scale,
                 shelter: 1.0,
+                cover: None,
             });
         }
     }
@@ -591,8 +639,13 @@ fn lay_out(seed: u64, terrain: &Terrain, trees: &[Tree]) -> Vec<Chunk> {
                 yaw: random.between(0.0, std::f32::consts::TAU),
                 scale,
                 shelter: 1.0 - 0.6 * thickness,
+                cover: None,
             });
         }
+    }
+    // WILDERNESS_COVER=0 leaves the ground cover out.
+    if std::env::var("WILDERNESS_COVER").as_deref() != Ok("0") {
+        ground_cover(seed, terrain, &thicket, &clumps, &patches, &obstacles, &mut chunks);
     }
     for chunk in &mut chunks {
         for placement in &chunk.placements {
@@ -600,6 +653,68 @@ fn lay_out(seed: u64, terrain: &Terrain, trees: &[Tree]) -> Vec<Chunk> {
         }
     }
     chunks
+}
+
+/// The ground cover over the soil (see the module's description): as thick as [`MOST_COVER`] in
+/// the open, thinner in the shade, in clumps, each kind in its patches - those of the floor's own
+/// plants, so the carpet is of the plants growing over it.
+fn ground_cover(
+    seed: u64,
+    terrain: &Terrain,
+    thicket: &Thicket,
+    clumps: &Noise,
+    patches: &[Noise],
+    obstacles: &Obstacles,
+    chunks: &mut [Chunk],
+) {
+    let extent = extent();
+    let kinds: Vec<usize> = COVER
+        .iter()
+        .map(|name| PLANTS.iter().position(|kind| kind.name == *name).expect("a floor plant"))
+        .collect();
+    for (index, chunk) in chunks.iter_mut().enumerate() {
+        let mut random = Random::for_place(seed, index as i64, 3);
+        for _ in 0..(MOST_COVER * CHUNK * CHUNK).round() as usize {
+            let at = chunk.middle + Vector2::new(random.between(-0.5, 0.5), random.between(-0.5, 0.5)) * CHUNK;
+            if at.x.abs() >= extent || at.y.abs() >= extent || at.norm() < 1.0 || terrain.wet(at.x, at.y, PLANTS_OFF_WATER) {
+                continue;
+            }
+            let thickness = thicket.at(at.x, at.y);
+            // The share of the most there is room for that grows here: thinner in the shade, and
+            // in clumps.
+            let share = ((0.35 + 0.65 * (1.0 - thickness)) * (0.4 + 0.8 * clumps.at(at.x / 5.0, at.y / 5.0))).min(1.0);
+            if random.unit() > share {
+                continue;
+            }
+            let weights: Vec<f32> = kinds
+                .iter()
+                .map(|&k| {
+                    let kind = &PLANTS[k];
+                    let habitat = kind.open + (kind.shade - kind.open) * thickness;
+                    habitat * (0.3 + smoothstep(0.4, 0.75, patches[k].at(at.x / kind.patch, at.y / kind.patch)))
+                })
+                .collect();
+            let Some(pick) = random.pick(&weights) else {
+                continue;
+            };
+            let kind = &PLANTS[kinds[pick]];
+            let scale = COVER_SCALE * random.between(kind.scale.0, kind.scale.1);
+            if obstacles.blocked(at, 0.3 * kind.radius * scale) {
+                continue;
+            }
+            let Some(band) = random.pick(&COVER_SHARES) else {
+                continue;
+            };
+            chunk.placements.push(Placement {
+                kind: kinds[pick],
+                position: Vector3::new(at.x, terrain.height(at.x, at.y), at.y),
+                yaw: random.between(0.0, std::f32::consts::TAU),
+                scale,
+                shelter: 1.0 - 0.6 * thickness,
+                cover: Some(band),
+            });
+        }
+    }
 }
 
 /// The shores, as the Birch Glade scatters them along its seeded waterlines: gravel in uneven bars
@@ -622,6 +737,7 @@ fn shores(seed: u64, terrain: &Terrain, thicket: &Thicket, obstacles: &mut Obsta
             yaw,
             scale,
             shelter: 1.0 - 0.6 * thicket.at(at.x, at.y),
+            cover: None,
         });
     };
     for (c, channel) in terrain.channels.iter().enumerate() {
@@ -746,8 +862,33 @@ mod tests {
             assert!(band < BANDS.len());
         }
         let area = (2.0 * extent) * (2.0 * extent);
-        let density = placements.len() as f32 / area;
+        let density = placements.iter().filter(|p| p.cover.is_none()).count() as f32 / area;
         assert!((0.3..1.5).contains(&density), "{density} a square meter");
+    }
+
+    #[test]
+    fn ground_cover_is_low_thick_and_only_near() {
+        let terrain = Terrain::new(1);
+        let trees = forest::lay_out(1, &terrain);
+        let chunks = lay_out(1, &terrain, &trees);
+        let cover: Vec<&Placement> = chunks.iter().flat_map(|c| &c.placements).filter(|p| p.cover.is_some()).collect();
+        let extent = extent();
+        let density = cover.len() as f32 / ((2.0 * extent) * (2.0 * extent));
+        assert!((0.4..MOST_COVER).contains(&density), "{density} tufts a square meter");
+        for p in &cover {
+            assert!(COVER.contains(&p.kind().name), "{} is no ground cover", p.kind().name);
+            assert!(p.band() < COVER_BANDS && p.height() < 1.0, "{} {} m tall, band {}", p.kind().name, p.height(), p.band());
+            for tree in &trees {
+                let trunk = forest::SPECIES[tree.species].trunk * tree.scale;
+                assert!((tree.position.xz() - p.position.xz()).norm() >= trunk, "{} in a trunk", p.kind().name);
+            }
+        }
+        // More of it underfoot than further off.
+        let in_band = |b: usize| cover.iter().filter(|p| p.band() == b).count();
+        assert!(in_band(0) > in_band(1) && in_band(1) > in_band(2));
+        // The rest of the floor shows from as far as it did: none in the cover's bands.
+        let rest = chunks.iter().flat_map(|c| &c.placements).filter(|p| p.cover.is_none());
+        assert!(rest.clone().all(|p| p.band() >= COVER_BANDS && BANDS[p.band()] >= NEAREST_PLANTS));
     }
 
     #[test]

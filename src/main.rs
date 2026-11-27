@@ -15,7 +15,7 @@
 //! and says why in the log; WILDERNESS_CANDELITE_VIEW=1 shows what Candelite's rays see, =lit with the
 //! light on it;
 //! WILDERNESS_WIND=0 stills the wind; WILDERNESS_FLOOR=0 leaves the forest floor
-//! bare.
+//! bare, and WILDERNESS_COVER=0 only the ground cover out of it.
 
 mod bed;
 mod day;
